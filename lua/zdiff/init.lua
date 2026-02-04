@@ -26,7 +26,7 @@ local M = {}
 ---@field files ZdiffFile[]
 ---@field buf number|nil buffer handle
 ---@field win number|nil window handle
----@field mode "uncommitted"|"main" diff mode
+---@field mode "uncommitted"|"branch" diff mode
 ---@field line_map table<number, {file_idx: number, hunk_idx: number|nil, line_idx: number|nil, lnum: number|nil}>
 
 ---@type ZdiffState
@@ -41,16 +41,28 @@ local state = {
 -- Forward declarations
 local goto_source
 local toggle_expand
+local show_help
 
 -- Configuration
+---@class ZdiffConfig
+---@field default_expanded boolean Whether files are expanded by default
+---@field base_branch string|nil Explicit base branch for comparison, or nil for auto-detect
+---@field fallback_branches string[] Branches to try when auto-detecting (in order)
+---@field keymaps table<string, string> Keymap bindings
+---@field icons table<string, string> Icons for UI elements
+
+---@type ZdiffConfig
 M.config = {
-  default_expanded = false, -- Whether files are expanded by default
+  default_expanded = false,
+  base_branch = nil, -- nil means auto-detect
+  fallback_branches = { "main", "master", "develop" },
   keymaps = {
     goto_file = "<CR>",
     toggle = "<Tab>",
     close = "q",
     refresh = "R",
     toggle_mode = "m",
+    help = "?",
   },
   icons = {
     collapsed = "",
@@ -60,6 +72,13 @@ M.config = {
     modified = "~",
   },
 }
+
+---Send a notification with zdiff prefix
+---@param msg string
+---@param level? number vim.log.levels value
+local function notify(msg, level)
+  vim.notify("[zdiff] " .. msg, level or vim.log.levels.INFO)
+end
 
 ---Get the git root directory
 ---@return string|nil
@@ -72,29 +91,37 @@ local function get_git_root()
 end
 
 ---Get the base ref for diffing
----@param mode "uncommitted"|"main"
+---@param mode "uncommitted"|"branch"
 ---@return string
 local function get_base_ref(mode)
-  if mode == "main" then
-    -- Try to find the default branch
+  if mode == "branch" then
+    -- Use explicit base_branch if configured
+    if M.config.base_branch then
+      return M.config.base_branch
+    end
+
+    -- Try to find the default branch from origin/HEAD
     local result = vim.fn.systemlist("git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null")
     if vim.v.shell_error == 0 and result[1] then
       return result[1]:gsub("refs/remotes/origin/", "")
     end
-    -- Fallback to common names
-    for _, branch in ipairs({ "main", "master" }) do
-      local check = vim.fn.system("git rev-parse --verify " .. branch .. " 2>/dev/null")
+
+    -- Fallback to configured branches in order
+    for _, branch in ipairs(M.config.fallback_branches) do
+      vim.fn.system("git rev-parse --verify " .. branch .. " 2>/dev/null")
       if vim.v.shell_error == 0 then
         return branch
       end
     end
+
+    -- Last resort fallback
     return "main"
   end
   return "HEAD"
 end
 
 ---Parse the diff stat output to get file statistics
----@param mode "uncommitted"|"main"
+---@param mode "uncommitted"|"branch"
 ---@return table<string, {insertions: number, deletions: number, status: string}>
 local function get_diff_stats(mode)
   local base = get_base_ref(mode)
@@ -148,11 +175,11 @@ end
 ---@return number old_start, number old_count, number new_start, number new_count
 local function parse_hunk_header(header)
   local old_start, old_count, new_start, new_count =
-      header:match("^@@ %-(%d+),?(%d*) %+(%d+),?(%d*) @@")
+    header:match("^@@ %-(%d+),?(%d*) %+(%d+),?(%d*) @@")
   return tonumber(old_start) or 0,
-      tonumber(old_count) or 1,
-      tonumber(new_start) or 0,
-      tonumber(new_count) or 1
+    tonumber(old_count) or 1,
+    tonumber(new_start) or 0,
+    tonumber(new_count) or 1
 end
 
 ---Parse diff output for a single file into hunks
@@ -216,7 +243,7 @@ end
 
 ---Get diff hunks for a specific file
 ---@param filepath string
----@param mode "uncommitted"|"main"
+---@param mode "uncommitted"|"branch"
 ---@return ZdiffHunk[]
 local function get_file_diff(filepath, mode)
   local base = get_base_ref(mode)
@@ -236,7 +263,7 @@ local function get_file_diff(filepath, mode)
 end
 
 ---Load all changed files and their stats
----@param mode "uncommitted"|"main"
+---@param mode "uncommitted"|"branch"
 ---@return ZdiffFile[]
 local function load_files(mode)
   local stats = get_diff_stats(mode)
@@ -373,7 +400,7 @@ local function render()
     return
   end
 
-  vim.api.nvim_buf_set_option(state.buf, "modifiable", true)
+  vim.bo[state.buf].modifiable = true
 
   local lines = {}
   local highlights = {} -- {line_idx, hl_group, col_start, col_end}
@@ -381,9 +408,15 @@ local function render()
   state.line_map = {}
 
   -- Header
-  local mode_text = state.mode == "uncommitted" and "Uncommitted changes" or "Changes vs main"
+  local mode_text
+  if state.mode == "uncommitted" then
+    mode_text = "Uncommitted changes"
+  else
+    local base = get_base_ref(state.mode)
+    mode_text = "Changes vs " .. base
+  end
   table.insert(lines, string.format(" zdiff: %s", mode_text))
-  table.insert(lines, string.rep("─", 60))
+  table.insert(lines, string.rep("-", 60))
   table.insert(highlights, { #lines - 1, "Title", 0, -1 })
   table.insert(highlights, { #lines, "Comment", 0, -1 })
 
@@ -517,7 +550,7 @@ local function render()
     vim.api.nvim_buf_add_highlight(state.buf, ns_syntax, hl_group, line_idx - 1, col_start, col_end)
   end
 
-  vim.api.nvim_buf_set_option(state.buf, "modifiable", false)
+  vim.bo[state.buf].modifiable = false
 end
 
 ---Toggle expand/collapse for file under cursor
@@ -579,6 +612,84 @@ goto_source = function()
   vim.cmd("normal! zz") -- Center the line
 end
 
+---Show help in a floating window
+show_help = function()
+  local help_lines = {
+    " zdiff keymaps",
+    "",
+    string.format("  %s  Go to file/line", M.config.keymaps.goto_file),
+    string.format("  %s  Toggle expand/collapse", M.config.keymaps.toggle),
+    string.format("  %s  Toggle mode (uncommitted/branch)", M.config.keymaps.toggle_mode),
+    string.format("  %s  Refresh", M.config.keymaps.refresh),
+    string.format("  %s  Close zdiff", M.config.keymaps.close),
+    string.format("  %s  Show this help", M.config.keymaps.help),
+    "",
+    " Press any key to close",
+  }
+
+  -- Calculate window size
+  local width = 0
+  for _, line in ipairs(help_lines) do
+    width = math.max(width, #line)
+  end
+  width = width + 4
+  local height = #help_lines
+
+  -- Create buffer
+  local help_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(help_buf, 0, -1, false, help_lines)
+  vim.bo[help_buf].modifiable = false
+  vim.bo[help_buf].bufhidden = "wipe"
+
+  -- Calculate position (centered)
+  local ui = vim.api.nvim_list_uis()[1]
+  local row = math.floor((ui.height - height) / 2)
+  local col = math.floor((ui.width - width) / 2)
+
+  -- Create floating window
+  local help_win = vim.api.nvim_open_win(help_buf, true, {
+    relative = "editor",
+    row = row,
+    col = col,
+    width = width,
+    height = height,
+    style = "minimal",
+    border = "rounded",
+    title = " Help ",
+    title_pos = "center",
+  })
+
+  -- Add highlights
+  local ns = vim.api.nvim_create_namespace("zdiff_help")
+  vim.api.nvim_buf_add_highlight(help_buf, ns, "Title", 0, 0, -1)
+  vim.api.nvim_buf_add_highlight(help_buf, ns, "Comment", #help_lines - 1, 0, -1)
+
+  -- Close on any key
+  vim.keymap.set("n", "<Esc>", function()
+    vim.api.nvim_win_close(help_win, true)
+  end, { buffer = help_buf, nowait = true })
+
+  -- Close on any other key press
+  vim.api.nvim_create_autocmd("CursorMoved", {
+    buffer = help_buf,
+    once = true,
+    callback = function()
+      if vim.api.nvim_win_is_valid(help_win) then
+        vim.api.nvim_win_close(help_win, true)
+      end
+    end,
+  })
+
+  -- Also close if they press any key (using a catch-all mapping)
+  for _, key in ipairs({ "q", "<CR>", "<Space>", "?", "h", "j", "k", "l" }) do
+    vim.keymap.set("n", key, function()
+      if vim.api.nvim_win_is_valid(help_win) then
+        vim.api.nvim_win_close(help_win, true)
+      end
+    end, { buffer = help_buf, nowait = true })
+  end
+end
+
 ---Refresh the diff view, preserving expanded state and cursor position
 local function refresh()
   -- Remember cursor position
@@ -613,9 +724,9 @@ local function refresh()
   end
 end
 
----Toggle between uncommitted and main modes
+---Toggle between uncommitted and branch modes
 local function toggle_mode()
-  state.mode = state.mode == "uncommitted" and "main" or "uncommitted"
+  state.mode = state.mode == "uncommitted" and "branch" or "uncommitted"
   -- Clear hunks so they get reloaded
   for _, file in ipairs(state.files) do
     file.hunks = {}
@@ -633,11 +744,11 @@ local function close()
 end
 
 ---Create the zdiff buffer and window
----@param mode? "uncommitted"|"main"
+---@param mode? "uncommitted"|"branch"
 function M.open(mode)
   -- Check if we're in a git repo
   if not get_git_root() then
-    vim.notify("Not in a git repository", vim.log.levels.ERROR)
+    notify("Not in a git repository", vim.log.levels.ERROR)
     return
   end
 
@@ -652,22 +763,22 @@ function M.open(mode)
 
   -- Create buffer
   state.buf = vim.api.nvim_create_buf(false, true)
-  vim.api.nvim_buf_set_option(state.buf, "buftype", "nofile")
-  vim.api.nvim_buf_set_option(state.buf, "bufhidden", "hide")
-  vim.api.nvim_buf_set_option(state.buf, "swapfile", false)
+  vim.bo[state.buf].buftype = "nofile"
+  vim.bo[state.buf].bufhidden = "hide"
+  vim.bo[state.buf].swapfile = false
   vim.api.nvim_buf_set_name(state.buf, "zdiff")
-  vim.api.nvim_buf_set_option(state.buf, "filetype", "zdiff")
+  vim.bo[state.buf].filetype = "zdiff"
 
   -- Open in current window
   state.win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(state.win, state.buf)
 
   -- Window options
-  vim.api.nvim_win_set_option(state.win, "number", false)
-  vim.api.nvim_win_set_option(state.win, "relativenumber", false)
-  vim.api.nvim_win_set_option(state.win, "signcolumn", "no")
-  vim.api.nvim_win_set_option(state.win, "wrap", false)
-  vim.api.nvim_win_set_option(state.win, "cursorline", true)
+  vim.wo[state.win].number = false
+  vim.wo[state.win].relativenumber = false
+  vim.wo[state.win].signcolumn = "no"
+  vim.wo[state.win].wrap = false
+  vim.wo[state.win].cursorline = true
 
   -- Set up keymaps
   local opts = { buffer = state.buf, silent = true }
@@ -676,6 +787,7 @@ function M.open(mode)
   vim.keymap.set("n", M.config.keymaps.close, close, opts)
   vim.keymap.set("n", M.config.keymaps.refresh, refresh, opts)
   vim.keymap.set("n", M.config.keymaps.toggle_mode, toggle_mode, opts)
+  vim.keymap.set("n", M.config.keymaps.help, show_help, opts)
 
   -- Auto-refresh when returning to zdiff buffer
   vim.api.nvim_create_autocmd("BufEnter", {
@@ -690,13 +802,16 @@ function M.open(mode)
   refresh()
 end
 
----Open zdiff comparing HEAD to main
-function M.open_vs_main()
-  M.open("main")
+---Open zdiff comparing HEAD to base branch
+function M.open_vs_branch()
+  M.open("branch")
 end
 
+-- Keep backward compatibility alias
+M.open_vs_main = M.open_vs_branch
+
 ---Setup function
----@param opts? table
+---@param opts? ZdiffConfig
 function M.setup(opts)
   if opts then
     M.config = vim.tbl_deep_extend("force", M.config, opts)
@@ -707,9 +822,14 @@ function M.setup(opts)
     M.open("uncommitted")
   end, { desc = "Open zdiff for uncommitted changes" })
 
+  vim.api.nvim_create_user_command("ZdiffBranch", function()
+    M.open("branch")
+  end, { desc = "Open zdiff comparing to base branch" })
+
+  -- Keep backward compatibility alias
   vim.api.nvim_create_user_command("ZdiffMain", function()
-    M.open("main")
-  end, { desc = "Open zdiff comparing to main branch" })
+    M.open("branch")
+  end, { desc = "Open zdiff comparing to base branch (alias for ZdiffBranch)" })
 end
 
 return M

@@ -1,0 +1,167 @@
+*zdiff.txt*  A minimal git diff viewer for Neovim
+
+Author:  Martin Durhuus
+License: MIT
+
+==============================================================================
+CONTENTS                                                      *zdiff-contents*
+
+    1. Introduction ............................ |zdiff-introduction|
+    2. Requirements ............................ |zdiff-requirements|
+    3. Commands ................................ |zdiff-commands|
+    4. Keymaps ................................. |zdiff-keymaps|
+    5. Configuration ........................... |zdiff-configuration|
+    6. Functions ............................... |zdiff-functions|
+
+==============================================================================
+1. INTRODUCTION                                           *zdiff-introduction*
+
+zdiff.nvim is a minimal, fast git diff viewer for Neovim. It provides a
+collapsible tree view of changed files with inline diff display and
+treesitter syntax highlighting.
+
+Inspired by Zed's multi-buffer diff view - a clean, collapsible interface
+for reviewing changes across multiple files without leaving your editor.
+
+Features:
+- View uncommitted changes or changes compared to a base branch
+- Expand/collapse files to see inline diffs
+- Treesitter syntax highlighting in diff views
+- Jump directly to source files at the correct line
+- Auto-refresh when returning to zdiff buffer
+
+==============================================================================
+2. REQUIREMENTS                                           *zdiff-requirements*
+
+- Neovim >= 0.9.0
+- git (must be in PATH)
+- (Optional) nvim-treesitter for syntax highlighting
+
+Run `:checkhealth zdiff` to verify your setup.
+
+==============================================================================
+3. COMMANDS                                                   *zdiff-commands*
+
+                                                                      *:Zdiff*
+:Zdiff
+    Open zdiff showing uncommitted changes (diff against HEAD).
+    Shows files that have been modified but not yet committed.
+
+                                                                *:ZdiffBranch*
+:ZdiffBranch
+    Open zdiff comparing current HEAD to the base branch.
+    The base branch is determined by:
+    1. `base_branch` config option (if set)
+    2. `origin/HEAD` symbolic ref
+    3. First match from `fallback_branches` (default: main, master, develop)
+
+                                                                  *:ZdiffMain*
+:ZdiffMain
+    Alias for |:ZdiffBranch|. Kept for backward compatibility.
+
+==============================================================================
+4. KEYMAPS                                                     *zdiff-keymaps*
+
+These keymaps are available in the zdiff buffer:
+
+    <CR>        Go to the file/line under cursor. Opens the file and
+                positions cursor at the corresponding line.
+
+    <Tab>       Toggle expand/collapse for the file under cursor.
+                When expanded, shows the inline diff with syntax
+                highlighting.
+
+    m           Toggle between "uncommitted" and "branch" diff modes.
+
+    R           Refresh the diff view. Preserves expanded state and
+                cursor position.
+
+    q           Close zdiff and delete the buffer.
+
+    ?           Show help popup with all available keymaps.
+
+All keymaps are configurable via |zdiff-configuration|.
+
+==============================================================================
+5. CONFIGURATION                                         *zdiff-configuration*
+
+Call the setup function with an optional configuration table: >lua
+
+    require("zdiff").setup({
+      -- Whether files are expanded by default
+      default_expanded = false,
+
+      -- Explicit base branch, or nil for auto-detect
+      base_branch = nil,
+
+      -- Fallback branches for auto-detection (in order)
+      fallback_branches = { "main", "master", "develop" },
+
+      -- Keymap bindings
+      keymaps = {
+        goto_file = "<CR>",
+        toggle = "<Tab>",
+        close = "q",
+        refresh = "R",
+        toggle_mode = "m",
+        help = "?",
+      },
+
+      -- Icons for UI elements
+      icons = {
+        collapsed = "",
+        expanded = "",
+        added = "+",
+        deleted = "-",
+        modified = "~",
+      },
+    })
+<
+
+                                                    *zdiff-config-base_branch*
+base_branch ~
+    Type: `string|nil`
+    Default: `nil`
+
+    When set to a string, this branch will always be used as the comparison
+    target for |:ZdiffBranch|. When `nil`, zdiff will auto-detect the base
+    branch.
+
+                                                *zdiff-config-fallback_branches*
+fallback_branches ~
+    Type: `string[]`
+    Default: `{ "main", "master", "develop" }`
+
+    When auto-detecting the base branch, zdiff tries these branches in order
+    after checking `origin/HEAD`. The first existing branch is used.
+
+                                               *zdiff-config-default_expanded*
+default_expanded ~
+    Type: `boolean`
+    Default: `false`
+
+    When `true`, all files are expanded by default when opening zdiff.
+
+==============================================================================
+6. FUNCTIONS                                                 *zdiff-functions*
+
+                                                               *zdiff.setup()*
+zdiff.setup({opts})
+    Initialize zdiff with the given options. See |zdiff-configuration|.
+
+                                                                *zdiff.open()*
+zdiff.open({mode})
+    Open zdiff with the specified mode.
+    Parameters:
+        {mode}  `"uncommitted"` or `"branch"` (default: `"uncommitted"`)
+
+                                                          *zdiff.open_vs_branch()*
+zdiff.open_vs_branch()
+    Open zdiff in branch comparison mode. Equivalent to `zdiff.open("branch")`.
+
+                                                            *zdiff.open_vs_main()*
+zdiff.open_vs_main()
+    Alias for |zdiff.open_vs_branch()|. Kept for backward compatibility.
+
+==============================================================================
+vim:tw=78:ts=8:ft=help:norl:
