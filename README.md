@@ -174,6 +174,16 @@ require("zdiff").setup({
 
 Run `:checkhealth zdiff` to verify your setup.
 
+## Development
+
+### Running Tests
+
+Tests use [plenary.nvim](https://github.com/nvim-lua/plenary.nvim):
+
+```bash
+make test
+```
+
 ## License
 
 MIT
