@@ -6,11 +6,12 @@ Inspired by [Zed's](https://zed.dev) multi-buffer diff view - a clean, collapsib
 
 ## Features
 
-- View uncommitted changes or changes compared to a base branch
+- View uncommitted changes or changes compared to any git ref
 - Expand/collapse files to see inline diffs
 - Treesitter syntax highlighting in diff views
 - Jump directly to source files at the correct line
 - Auto-refresh when returning to zdiff buffer
+- Tab completion for branch/tag names
 - Configurable keymaps and icons
 
 ## Requirements
@@ -25,11 +26,11 @@ Inspired by [Zed's](https://zed.dev) multi-buffer diff view - a clean, collapsib
 
 ```lua
 {
-  "yourusername/zdiff.nvim",
-  cmd = { "Zdiff", "ZdiffBranch" },
+  "martindur/zdiff.nvim",
+  cmd = "Zdiff",
   keys = {
-    { "<leader>dz", "<cmd>Zdiff<cr>", desc = "Git diff (uncommitted)" },
-    { "<leader>dZ", "<cmd>ZdiffBranch<cr>", desc = "Git diff (vs branch)" },
+    { "<leader>gd", "<cmd>Zdiff<cr>", desc = "Git diff (uncommitted)" },
+    { "<leader>gD", "<cmd>Zdiff main<cr>", desc = "Git diff (vs main)" },
   },
   opts = {},
 }
@@ -57,13 +58,22 @@ lua require("zdiff").setup()
 
 ## Usage
 
-### Commands
+### Command
 
-| Command | Description |
+```vim
+:Zdiff [ref]
+```
+
+| Example | Description |
 |---------|-------------|
-| `:Zdiff` | Open zdiff for uncommitted changes (vs HEAD) |
-| `:ZdiffBranch` | Open zdiff comparing HEAD to base branch |
-| `:ZdiffMain` | Alias for `:ZdiffBranch` |
+| `:Zdiff` | Uncommitted changes (diff vs HEAD) |
+| `:Zdiff main` | Changes compared to `main` branch |
+| `:Zdiff develop` | Changes compared to `develop` branch |
+| `:Zdiff v1.0.0` | Changes compared to tag `v1.0.0` |
+| `:Zdiff HEAD~5` | Changes compared to 5 commits ago |
+| `:Zdiff origin/feature` | Changes compared to remote branch |
+
+Tab completion is available for branch and tag names.
 
 ### Keymaps (in zdiff buffer)
 
@@ -71,7 +81,7 @@ lua require("zdiff").setup()
 |-----|--------|
 | `<CR>` | Go to file/line under cursor |
 | `<Tab>` | Toggle expand/collapse file |
-| `m` | Toggle mode (uncommitted/branch) |
+| `m` | Toggle between uncommitted and branch mode |
 | `R` | Refresh diff |
 | `q` | Close zdiff |
 | `?` | Show help |
@@ -85,14 +95,10 @@ require("zdiff").setup({
   -- Whether files are expanded by default
   default_expanded = false,
 
-  -- Explicit base branch for comparison, or nil for auto-detect
-  -- Auto-detect tries: origin/HEAD, then fallback_branches in order
-  base_branch = nil,
+  -- Default branch for toggle_mode (m key)
+  default_branch = "main",
 
-  -- Branches to try when auto-detecting (in order)
-  fallback_branches = { "main", "master", "develop" },
-
-  -- Keymap bindings (set to false to disable)
+  -- Keymap bindings
   keymaps = {
     goto_file = "<CR>",
     toggle = "<Tab>",
@@ -115,11 +121,11 @@ require("zdiff").setup({
 
 ### Examples
 
-#### Use a specific base branch
+#### Set default branch to develop
 
 ```lua
 require("zdiff").setup({
-  base_branch = "develop",
+  default_branch = "develop",
 })
 ```
 

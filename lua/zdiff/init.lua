@@ -26,7 +26,7 @@ local M = {}
 ---@field files ZdiffFile[]
 ---@field buf number|nil buffer handle
 ---@field win number|nil window handle
----@field mode "uncommitted"|"branch" diff mode
+---@field base_ref string|nil the git ref to diff against (nil = uncommitted changes vs HEAD)
 ---@field line_map table<number, {file_idx: number, hunk_idx: number|nil, line_idx: number|nil, lnum: number|nil}>
 
 ---@type ZdiffState
@@ -34,28 +34,27 @@ local state = {
   files = {},
   buf = nil,
   win = nil,
-  mode = "uncommitted",
+  base_ref = nil,
   line_map = {},
 }
 
 -- Forward declarations
 local goto_source
 local toggle_expand
+local toggle_mode
 local show_help
 
 -- Configuration
 ---@class ZdiffConfig
 ---@field default_expanded boolean Whether files are expanded by default
----@field base_branch string|nil Explicit base branch for comparison, or nil for auto-detect
----@field fallback_branches string[] Branches to try when auto-detecting (in order)
+---@field default_branch string|nil Default branch for toggle_mode (e.g., "main", "develop")
 ---@field keymaps table<string, string> Keymap bindings
 ---@field icons table<string, string> Icons for UI elements
 
 ---@type ZdiffConfig
 M.config = {
   default_expanded = false,
-  base_branch = nil, -- nil means auto-detect
-  fallback_branches = { "main", "master", "develop" },
+  default_branch = "main",
   keymaps = {
     goto_file = "<CR>",
     toggle = "<Tab>",
@@ -90,46 +89,15 @@ local function get_git_root()
   return result[1]
 end
 
----Get the base ref for diffing
----@param mode "uncommitted"|"branch"
----@return string
-local function get_base_ref(mode)
-  if mode == "branch" then
-    -- Use explicit base_branch if configured
-    if M.config.base_branch then
-      return M.config.base_branch
-    end
-
-    -- Try to find the default branch from origin/HEAD
-    local result = vim.fn.systemlist("git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null")
-    if vim.v.shell_error == 0 and result[1] then
-      return result[1]:gsub("refs/remotes/origin/", "")
-    end
-
-    -- Fallback to configured branches in order
-    for _, branch in ipairs(M.config.fallback_branches) do
-      vim.fn.system("git rev-parse --verify " .. branch .. " 2>/dev/null")
-      if vim.v.shell_error == 0 then
-        return branch
-      end
-    end
-
-    -- Last resort fallback
-    return "main"
-  end
-  return "HEAD"
-end
-
 ---Parse the diff stat output to get file statistics
----@param mode "uncommitted"|"branch"
+---@param base_ref string|nil git ref to diff against, or nil for uncommitted
 ---@return table<string, {insertions: number, deletions: number, status: string}>
-local function get_diff_stats(mode)
-  local base = get_base_ref(mode)
+local function get_diff_stats(base_ref)
   local cmd
-  if mode == "uncommitted" then
-    cmd = "git diff --numstat HEAD"
+  if base_ref then
+    cmd = "git diff --numstat " .. vim.fn.shellescape(base_ref) .. "...HEAD"
   else
-    cmd = "git diff --numstat " .. base .. "...HEAD"
+    cmd = "git diff --numstat HEAD"
   end
 
   local stats = {}
@@ -151,10 +119,10 @@ local function get_diff_stats(mode)
 
   -- Get status for each file
   local status_cmd
-  if mode == "uncommitted" then
-    status_cmd = "git diff --name-status HEAD"
+  if base_ref then
+    status_cmd = "git diff --name-status " .. vim.fn.shellescape(base_ref) .. "...HEAD"
   else
-    status_cmd = "git diff --name-status " .. base .. "...HEAD"
+    status_cmd = "git diff --name-status HEAD"
   end
 
   local status_result = vim.fn.systemlist(status_cmd)
@@ -243,15 +211,14 @@ end
 
 ---Get diff hunks for a specific file
 ---@param filepath string
----@param mode "uncommitted"|"branch"
+---@param base_ref string|nil git ref to diff against, or nil for uncommitted
 ---@return ZdiffHunk[]
-local function get_file_diff(filepath, mode)
-  local base = get_base_ref(mode)
+local function get_file_diff(filepath, base_ref)
   local cmd
-  if mode == "uncommitted" then
-    cmd = string.format("git diff HEAD -- %s", vim.fn.shellescape(filepath))
+  if base_ref then
+    cmd = string.format("git diff %s...HEAD -- %s", vim.fn.shellescape(base_ref), vim.fn.shellescape(filepath))
   else
-    cmd = string.format("git diff %s...HEAD -- %s", base, vim.fn.shellescape(filepath))
+    cmd = string.format("git diff HEAD -- %s", vim.fn.shellescape(filepath))
   end
 
   local result = vim.fn.systemlist(cmd)
@@ -263,10 +230,10 @@ local function get_file_diff(filepath, mode)
 end
 
 ---Load all changed files and their stats
----@param mode "uncommitted"|"branch"
+---@param base_ref string|nil git ref to diff against, or nil for uncommitted
 ---@return ZdiffFile[]
-local function load_files(mode)
-  local stats = get_diff_stats(mode)
+local function load_files(base_ref)
+  local stats = get_diff_stats(base_ref)
   local files = {}
 
   for path, info in pairs(stats) do
@@ -409,11 +376,10 @@ local function render()
 
   -- Header
   local mode_text
-  if state.mode == "uncommitted" then
-    mode_text = "Uncommitted changes"
+  if state.base_ref then
+    mode_text = "Changes vs " .. state.base_ref
   else
-    local base = get_base_ref(state.mode)
-    mode_text = "Changes vs " .. base
+    mode_text = "Uncommitted changes"
   end
   table.insert(lines, string.format(" zdiff: %s", mode_text))
   table.insert(lines, string.rep("-", 60))
@@ -455,7 +421,7 @@ local function render()
       if file.expanded then
         -- Load hunks if not already loaded
         if #file.hunks == 0 then
-          file.hunks = get_file_diff(file.path, state.mode)
+          file.hunks = get_file_diff(file.path, state.base_ref)
         end
 
         -- Get language for syntax highlighting
@@ -705,7 +671,7 @@ local function refresh()
   end
 
   -- Reload files
-  state.files = load_files(state.mode)
+  state.files = load_files(state.base_ref)
 
   -- Restore expanded state
   for _, file in ipairs(state.files) do
@@ -724,9 +690,15 @@ local function refresh()
   end
 end
 
----Toggle between uncommitted and branch modes
-local function toggle_mode()
-  state.mode = state.mode == "uncommitted" and "branch" or "uncommitted"
+---Toggle between uncommitted and branch mode
+toggle_mode = function()
+  if state.base_ref then
+    -- Currently comparing to a branch, switch to uncommitted
+    state.base_ref = nil
+  else
+    -- Currently showing uncommitted, switch to default_branch
+    state.base_ref = M.config.default_branch
+  end
   -- Clear hunks so they get reloaded
   for _, file in ipairs(state.files) do
     file.hunks = {}
@@ -744,22 +716,39 @@ local function close()
 end
 
 ---Create the zdiff buffer and window
----@param mode? "uncommitted"|"branch"
-function M.open(mode)
+---@param base_ref? string git ref to diff against (e.g., "main", "develop", "HEAD~3"). If nil, shows uncommitted changes.
+function M.open(base_ref)
   -- Check if we're in a git repo
   if not get_git_root() then
     notify("Not in a git repository", vim.log.levels.ERROR)
     return
   end
 
-  -- If zdiff buffer already exists, just switch to it
-  if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
-    state.win = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(state.win, state.buf)
-    return
+  -- Validate the ref if provided
+  if base_ref and base_ref ~= "" then
+    vim.fn.system("git rev-parse --verify " .. vim.fn.shellescape(base_ref) .. " 2>/dev/null")
+    if vim.v.shell_error ~= 0 then
+      notify("Invalid git ref: " .. base_ref, vim.log.levels.ERROR)
+      return
+    end
+  else
+    base_ref = nil
   end
 
-  state.mode = mode or "uncommitted"
+  -- If zdiff buffer already exists and we're switching refs, close it first
+  if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
+    if state.base_ref == base_ref then
+      -- Same ref, just switch to the buffer
+      state.win = vim.api.nvim_get_current_win()
+      vim.api.nvim_win_set_buf(state.win, state.buf)
+      return
+    else
+      -- Different ref, close and reopen
+      close()
+    end
+  end
+
+  state.base_ref = base_ref
 
   -- Create buffer
   state.buf = vim.api.nvim_create_buf(false, true)
@@ -802,34 +791,12 @@ function M.open(mode)
   refresh()
 end
 
----Open zdiff comparing HEAD to base branch
-function M.open_vs_branch()
-  M.open("branch")
-end
-
--- Keep backward compatibility alias
-M.open_vs_main = M.open_vs_branch
-
 ---Setup function
 ---@param opts? ZdiffConfig
 function M.setup(opts)
   if opts then
     M.config = vim.tbl_deep_extend("force", M.config, opts)
   end
-
-  -- Create user commands
-  vim.api.nvim_create_user_command("Zdiff", function()
-    M.open("uncommitted")
-  end, { desc = "Open zdiff for uncommitted changes" })
-
-  vim.api.nvim_create_user_command("ZdiffBranch", function()
-    M.open("branch")
-  end, { desc = "Open zdiff comparing to base branch" })
-
-  -- Keep backward compatibility alias
-  vim.api.nvim_create_user_command("ZdiffMain", function()
-    M.open("branch")
-  end, { desc = "Open zdiff comparing to base branch (alias for ZdiffBranch)" })
 end
 
 return M
