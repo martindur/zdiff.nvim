@@ -24,6 +24,18 @@ describe("zdiff", function()
     }
   end)
 
+  after_each(function()
+    -- Close any zdiff buffers after each test
+    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_is_valid(buf) then
+        local name = vim.api.nvim_buf_get_name(buf)
+        if name:match("zdiff") then
+          vim.api.nvim_buf_delete(buf, { force = true })
+        end
+      end
+    end
+  end)
+
   describe("setup", function()
     it("should use default config when called without arguments", function()
       zdiff.setup()
@@ -75,6 +87,48 @@ describe("zdiff", function()
       -- or we'd need to mock get_git_root
       -- For now, just verify the function exists
       assert.is_function(zdiff.open)
+    end)
+
+    it("should create a buffer with zdiff filetype", function()
+      zdiff.open()
+      local buf = vim.api.nvim_get_current_buf()
+      assert.equals("zdiff", vim.bo[buf].filetype)
+    end)
+
+    it("should set up help keymap that opens a floating window", function()
+      zdiff.open()
+      local zdiff_buf = vim.api.nvim_get_current_buf()
+
+      -- Count windows before
+      local wins_before = #vim.api.nvim_list_wins()
+
+      -- Simulate pressing '?' by executing the keymap
+      local keymaps = vim.api.nvim_buf_get_keymap(zdiff_buf, "n")
+      local help_keymap = nil
+      for _, km in ipairs(keymaps) do
+        if km.lhs == "?" then
+          help_keymap = km
+          break
+        end
+      end
+
+      assert.is_not_nil(help_keymap, "Help keymap '?' should be defined")
+      assert.is_not_nil(help_keymap.callback, "Help keymap should have a callback")
+
+      -- Execute the callback
+      help_keymap.callback()
+
+      -- Count windows after - should have one more (the floating window)
+      local wins_after = #vim.api.nvim_list_wins()
+      assert.equals(wins_before + 1, wins_after, "Help should open a floating window")
+
+      -- The new window should be floating
+      local float_win = vim.api.nvim_get_current_win()
+      local win_config = vim.api.nvim_win_get_config(float_win)
+      assert.equals("editor", win_config.relative, "Help window should be floating")
+
+      -- Clean up - close the float
+      vim.api.nvim_win_close(float_win, true)
     end)
   end)
 end)

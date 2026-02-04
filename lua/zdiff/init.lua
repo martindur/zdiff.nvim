@@ -609,8 +609,10 @@ show_help = function()
 
   -- Calculate position (centered)
   local ui = vim.api.nvim_list_uis()[1]
-  local row = math.floor((ui.height - height) / 2)
-  local col = math.floor((ui.width - width) / 2)
+  local editor_width = ui and ui.width or vim.o.columns
+  local editor_height = ui and ui.height or vim.o.lines
+  local row = math.floor((editor_height - height) / 2)
+  local col = math.floor((editor_width - width) / 2)
 
   -- Create floating window
   local help_win = vim.api.nvim_open_win(help_buf, true, {
