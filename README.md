@@ -29,8 +29,22 @@ Inspired by [Zed's](https://zed.dev) multi-buffer diff view - a clean, collapsib
   "martindur/zdiff.nvim",
   cmd = "Zdiff",
   keys = {
-    { "<leader>gd", "<cmd>Zdiff<cr>", desc = "Git diff (uncommitted)" },
-    { "<leader>gD", "<cmd>Zdiff main<cr>", desc = "Git diff (vs main)" },
+    { "<leader>zd", "<cmd>Zdiff<cr>", desc = "Zdiff (uncommitted)" },
+    { "<leader>zD", "<cmd>Zdiff main<cr>", desc = "Zdiff (vs main)" },
+  },
+  opts = {},
+}
+```
+
+Or with lua function keymaps:
+
+```lua
+{
+  "martindur/zdiff.nvim",
+  cmd = "Zdiff",
+  keys = {
+    { "<leader>zd", function() require("zdiff").open() end, desc = "Zdiff (uncommitted)" },
+    { "<leader>zD", function() require("zdiff").open("main") end, desc = "Zdiff (vs main)" },
   },
   opts = {},
 }
@@ -43,6 +57,9 @@ use {
   "martindur/zdiff.nvim",
   config = function()
     require("zdiff").setup()
+
+    vim.keymap.set("n", "<leader>zd", function() require("zdiff").open() end, { desc = "Zdiff (uncommitted)" })
+    vim.keymap.set("n", "<leader>zD", function() require("zdiff").open("main") end, { desc = "Zdiff (vs main)" })
   end,
 }
 ```
@@ -51,9 +68,14 @@ use {
 
 ```vim
 Plug 'martindur/zdiff.nvim'
+```
 
-" In your init.vim or after/plugin:
-lua require("zdiff").setup()
+```lua
+-- In your init.lua or after/plugin/zdiff.lua:
+require("zdiff").setup()
+
+vim.keymap.set("n", "<leader>zd", function() require("zdiff").open() end, { desc = "Zdiff (uncommitted)" })
+vim.keymap.set("n", "<leader>zD", function() require("zdiff").open("main") end, { desc = "Zdiff (vs main)" })
 ```
 
 ## Usage
