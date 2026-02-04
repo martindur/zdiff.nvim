@@ -580,25 +580,46 @@ end
 
 ---Show help in a floating window
 show_help = function()
-  local help_lines = {
-    " zdiff keymaps",
-    "",
-    string.format("  %s  Go to file/line", M.config.keymaps.goto_file),
-    string.format("  %s  Toggle expand/collapse", M.config.keymaps.toggle),
-    string.format("  %s  Toggle mode (uncommitted/branch)", M.config.keymaps.toggle_mode),
-    string.format("  %s  Refresh", M.config.keymaps.refresh),
-    string.format("  %s  Close zdiff", M.config.keymaps.close),
-    string.format("  %s  Show this help", M.config.keymaps.help),
-    "",
-    " Press any key to close",
+  local keymaps = {
+    { M.config.keymaps.goto_file, "Go to file/line" },
+    { M.config.keymaps.toggle, "Toggle expand/collapse" },
+    { M.config.keymaps.toggle_mode, "Toggle mode (uncommitted/branch)" },
+    { M.config.keymaps.refresh, "Refresh" },
+    { M.config.keymaps.close, "Close zdiff" },
+    { M.config.keymaps.help, "Show this help" },
   }
 
-  -- Calculate window size
-  local width = 0
-  for _, line in ipairs(help_lines) do
-    width = math.max(width, #line)
+  -- Find the longest description to calculate width
+  local max_desc_len = 0
+  local max_key_len = 0
+  for _, map in ipairs(keymaps) do
+    max_key_len = math.max(max_key_len, #map[1])
+    max_desc_len = math.max(max_desc_len, #map[2])
   end
-  width = width + 4
+
+  local inner_width = max_key_len + max_desc_len + 6 -- padding and spacing
+  local title = "zdiff keymaps"
+  inner_width = math.max(inner_width, #title + 2)
+
+  -- Build help lines with justified layout
+  local help_lines = {
+    " " .. title .. string.rep(" ", inner_width - #title - 1),
+    "",
+  }
+
+  for _, map in ipairs(keymaps) do
+    local key = map[1]
+    local desc = map[2]
+    local padding = inner_width - #key - #desc - 4
+    table.insert(help_lines, "  " .. key .. string.rep(" ", padding) .. desc .. "  ")
+  end
+
+  table.insert(help_lines, "")
+  local footer = "Press any key to close"
+  local footer_padding = math.floor((inner_width - #footer) / 2)
+  table.insert(help_lines, string.rep(" ", footer_padding) .. footer)
+
+  local width = inner_width + 2
   local height = #help_lines
 
   -- Create buffer
@@ -637,8 +658,8 @@ show_help = function()
     vim.api.nvim_win_close(help_win, true)
   end, { buffer = help_buf, nowait = true })
 
-  -- Close on any other key press
-  vim.api.nvim_create_autocmd("CursorMoved", {
+  -- Close when leaving the window
+  vim.api.nvim_create_autocmd("WinLeave", {
     buffer = help_buf,
     once = true,
     callback = function()
@@ -799,6 +820,11 @@ function M.setup(opts)
   if opts then
     M.config = vim.tbl_deep_extend("force", M.config, opts)
   end
+end
+
+-- Expose for debugging/testing
+M.show_help = function()
+  show_help()
 end
 
 return M

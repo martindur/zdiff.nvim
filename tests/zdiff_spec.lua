@@ -130,5 +130,40 @@ describe("zdiff", function()
       -- Clean up - close the float
       vim.api.nvim_win_close(float_win, true)
     end)
+
+    it("should keep help window open until user interacts", function()
+      zdiff.open()
+      local zdiff_buf = vim.api.nvim_get_current_buf()
+
+      -- Get and execute help keymap
+      local keymaps = vim.api.nvim_buf_get_keymap(zdiff_buf, "n")
+      local help_keymap = nil
+      for _, km in ipairs(keymaps) do
+        if km.lhs == "?" then
+          help_keymap = km
+          break
+        end
+      end
+      help_keymap.callback()
+
+      local float_win = vim.api.nvim_get_current_win()
+      local help_buf = vim.api.nvim_win_get_buf(float_win)
+
+      -- Window should still be valid (not closed immediately)
+      assert.is_true(vim.api.nvim_win_is_valid(float_win), "Help window should remain open")
+
+      -- Check buffer content contains expected text
+      local lines = vim.api.nvim_buf_get_lines(help_buf, 0, -1, false)
+      local content = table.concat(lines, "\n")
+
+      assert.is_truthy(content:find("zdiff keymaps"), "Help should contain title")
+      assert.is_truthy(content:find("Go to file"), "Help should contain goto_file description")
+      assert.is_truthy(content:find("Toggle"), "Help should contain toggle description")
+      assert.is_truthy(content:find("Close"), "Help should contain close description")
+      assert.is_truthy(content:find("Press any key"), "Help should contain footer")
+
+      -- Clean up
+      vim.api.nvim_win_close(float_win, true)
+    end)
   end)
 end)
