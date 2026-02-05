@@ -135,6 +135,34 @@ local function get_diff_stats(base_ref)
     end
   end
 
+  -- For uncommitted mode, also include untracked files
+  if not base_ref then
+    local untracked_cmd = "git ls-files --others --exclude-standard"
+    local untracked_result = vim.fn.systemlist(untracked_cmd)
+    if vim.v.shell_error == 0 then
+      for _, path in ipairs(untracked_result) do
+        if path ~= "" and not stats[path] then
+          -- Count lines in the new file
+          local git_root = get_git_root()
+          local filepath = git_root .. "/" .. path
+          local line_count = 0
+          local file = io.open(filepath, "r")
+          if file then
+            for _ in file:lines() do
+              line_count = line_count + 1
+            end
+            file:close()
+          end
+          stats[path] = {
+            insertions = line_count,
+            deletions = 0,
+            status = "?", -- untracked
+          }
+        end
+      end
+    end
+  end
+
   return stats
 end
 
@@ -212,8 +240,40 @@ end
 ---Get diff hunks for a specific file
 ---@param filepath string
 ---@param base_ref string|nil git ref to diff against, or nil for uncommitted
+---@param status string|nil file status (e.g., "M", "A", "D", "?")
 ---@return ZdiffHunk[]
-local function get_file_diff(filepath, base_ref)
+local function get_file_diff(filepath, base_ref, status)
+  -- For untracked files, show entire file as additions
+  if status == "?" then
+    local git_root = get_git_root()
+    local full_path = git_root .. "/" .. filepath
+    local file = io.open(full_path, "r")
+    if not file then
+      return {}
+    end
+
+    local lines = {}
+    for line in file:lines() do
+      table.insert(lines, { type = "add", text = line, new_lnum = #lines + 1 })
+    end
+    file:close()
+
+    if #lines == 0 then
+      return {}
+    end
+
+    return {
+      {
+        header = string.format("@@ -0,0 +1,%d @@ (new file)", #lines),
+        old_start = 0,
+        old_count = 0,
+        new_start = 1,
+        new_count = #lines,
+        lines = lines,
+      },
+    }
+  end
+
   local cmd
   if base_ref then
     cmd = string.format("git diff %s...HEAD -- %s", vim.fn.shellescape(base_ref), vim.fn.shellescape(filepath))
@@ -259,7 +319,7 @@ end
 ---@param status string
 ---@return string
 local function get_status_icon(status)
-  if status == "A" then
+  if status == "A" or status == "?" then
     return M.config.icons.added
   elseif status == "D" then
     return M.config.icons.deleted
@@ -421,7 +481,7 @@ local function render()
       if file.expanded then
         -- Load hunks if not already loaded
         if #file.hunks == 0 then
-          file.hunks = get_file_diff(file.path, state.base_ref)
+          file.hunks = get_file_diff(file.path, state.base_ref, file.status)
         end
 
         -- Get language for syntax highlighting
