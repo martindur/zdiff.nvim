@@ -21,6 +21,23 @@ describe("zdiff", function()
         deleted = "-",
         modified = "~",
       },
+      git = {
+        diff_mode = "three_dot",
+        ignore_whitespace = "none",
+      },
+      diff = {
+        context_lines = nil,
+        show_line_numbers = "none",
+        max_file_preview_lines = 0,
+      },
+      files = {
+        include_untracked = true,
+        sort = "path",
+        max_files = 0,
+      },
+      ui = {
+        path_style = "relative",
+      },
     }
   end)
 
@@ -42,6 +59,8 @@ describe("zdiff", function()
       assert.equals(false, zdiff.config.default_expanded)
       assert.equals("main", zdiff.config.default_branch)
       assert.equals("<CR>", zdiff.config.keymaps.goto_file)
+      assert.equals("three_dot", zdiff.config.git.diff_mode)
+      assert.equals("none", zdiff.config.git.ignore_whitespace)
     end)
 
     it("should merge user config with defaults", function()
@@ -53,6 +72,7 @@ describe("zdiff", function()
       assert.equals("develop", zdiff.config.default_branch)
       -- Should preserve other defaults
       assert.equals("<CR>", zdiff.config.keymaps.goto_file)
+      assert.equals("three_dot", zdiff.config.git.diff_mode)
     end)
 
     it("should allow overriding individual keymaps", function()
@@ -78,6 +98,36 @@ describe("zdiff", function()
       assert.equals("v", zdiff.config.icons.expanded)
       -- Should preserve other icons
       assert.equals("+", zdiff.config.icons.added)
+    end)
+
+    it("should allow overriding nested git/diff/files/ui config", function()
+      zdiff.setup({
+        git = {
+          diff_mode = "two_dot",
+          ignore_whitespace = "all",
+        },
+        diff = {
+          show_line_numbers = "both",
+          max_file_preview_lines = 100,
+        },
+        files = {
+          include_untracked = false,
+          sort = "changed_lines",
+          max_files = 10,
+        },
+        ui = {
+          path_style = "shortened",
+        },
+      })
+
+      assert.equals("two_dot", zdiff.config.git.diff_mode)
+      assert.equals("all", zdiff.config.git.ignore_whitespace)
+      assert.equals("both", zdiff.config.diff.show_line_numbers)
+      assert.equals(100, zdiff.config.diff.max_file_preview_lines)
+      assert.equals(false, zdiff.config.files.include_untracked)
+      assert.equals("changed_lines", zdiff.config.files.sort)
+      assert.equals(10, zdiff.config.files.max_files)
+      assert.equals("shortened", zdiff.config.ui.path_style)
     end)
   end)
 

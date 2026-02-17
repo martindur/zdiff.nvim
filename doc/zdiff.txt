@@ -114,6 +114,39 @@ Call the setup function with an optional configuration table: >lua
         deleted = "-",
         modified = "~",
       },
+
+      -- Git diff command preferences
+      git = {
+        -- "three_dot" (base...HEAD) or "two_dot" (base..HEAD)
+        diff_mode = "three_dot",
+        -- "none" | "eol" | "change" | "all"
+        ignore_whitespace = "none",
+      },
+
+      -- Diff rendering preferences
+      diff = {
+        -- nil uses git default context, number maps to -U<number>
+        context_lines = nil,
+        -- "none" | "new" | "old" | "both"
+        show_line_numbers = "none",
+        -- 0 = unlimited
+        max_file_preview_lines = 0,
+      },
+
+      -- File list preferences
+      files = {
+        include_untracked = true,
+        -- "path" | "status" | "changed_lines"
+        sort = "path",
+        -- 0 = unlimited
+        max_files = 0,
+      },
+
+      -- UI preferences
+      ui = {
+        -- "relative" | "filename_only" | "shortened"
+        path_style = "relative",
+      },
     })
 <
 
@@ -144,6 +177,111 @@ icons ~
     Type: `table`
 
     Icons used in the UI for collapsed/expanded states and file status.
+
+                                                            *zdiff-config-git*
+git ~
+    Type: `table`
+
+    Git diff command preferences.
+
+                                                      *zdiff-config-diff_mode*
+    git.diff_mode ~
+        Type: `string`
+        Default: `"three_dot"`
+
+        Controls ref comparison style in branch mode:
+        - `"three_dot"` uses `base...HEAD` (merge-base style)
+        - `"two_dot"` uses `base..HEAD` (tip-to-tip style)
+
+                                              *zdiff-config-ignore_whitespace*
+    git.ignore_whitespace ~
+        Type: `string`
+        Default: `"none"`
+
+        Controls whitespace sensitivity for git diff commands:
+        - `"none"`   no whitespace filtering
+        - `"eol"`    ignore end-of-line whitespace changes
+        - `"change"` ignore amount-of-whitespace changes
+        - `"all"`    ignore all whitespace differences
+
+                                                           *zdiff-config-diff*
+diff ~
+    Type: `table`
+
+    Diff rendering preferences.
+
+                                                  *zdiff-config-context_lines*
+    diff.context_lines ~
+        Type: `number|nil`
+        Default: `nil`
+
+        Unified context lines around hunks (`-U<number>`). `nil` uses git's
+        default context.
+
+                                              *zdiff-config-show_line_numbers*
+    diff.show_line_numbers ~
+        Type: `string`
+        Default: `"none"`
+
+        Show line numbers in diff output:
+        - `"none"` no line numbers
+        - `"new"`  show new-file line numbers
+        - `"old"`  show old-file line numbers
+        - `"both"` show both old and new line numbers
+
+                                          *zdiff-config-max_file_preview_lines*
+    diff.max_file_preview_lines ~
+        Type: `number`
+        Default: `0`
+
+        Max number of diff lines rendered per file when expanded. `0` means
+        unlimited.
+
+                                                          *zdiff-config-files*
+files ~
+    Type: `table`
+
+    File list behavior and ordering preferences.
+
+                                              *zdiff-config-include_untracked*
+    files.include_untracked ~
+        Type: `boolean`
+        Default: `true`
+
+        Include untracked files in uncommitted mode.
+
+                                                           *zdiff-config-sort*
+    files.sort ~
+        Type: `string`
+        Default: `"path"`
+
+        Sorting mode for changed files:
+        - `"path"` sorts alphabetically
+        - `"status"` groups by git status then path
+        - `"changed_lines"` sorts by total changed lines (desc)
+
+                                                      *zdiff-config-max_files*
+    files.max_files ~
+        Type: `number`
+        Default: `0`
+
+        Max number of files shown. `0` means unlimited.
+
+                                                             *zdiff-config-ui*
+ui ~
+    Type: `table`
+
+    UI display preferences.
+
+                                                     *zdiff-config-path_style*
+    ui.path_style ~
+        Type: `string`
+        Default: `"relative"`
+
+        Path rendering mode in file headers:
+        - `"relative"`      full repo-relative path
+        - `"filename_only"` only basename
+        - `"shortened"`     abbreviated directories (e.g. `l/z/init.lua`)
 
 ==============================================================================
 6. FUNCTIONS                                                 *zdiff-functions*

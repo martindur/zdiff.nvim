@@ -138,6 +138,39 @@ require("zdiff").setup({
     deleted = "-",
     modified = "~",
   },
+
+  -- Git diff command preferences
+  git = {
+    -- "three_dot" => base...HEAD, "two_dot" => base..HEAD
+    diff_mode = "three_dot",
+    -- "none" | "eol" | "change" | "all"
+    ignore_whitespace = "none",
+  },
+
+  -- Diff rendering preferences
+  diff = {
+    -- nil uses git default context, number maps to -U<number>
+    context_lines = nil,
+    -- "none" | "new" | "old" | "both"
+    show_line_numbers = "none",
+    -- 0 = unlimited
+    max_file_preview_lines = 0,
+  },
+
+  -- Changed file list preferences
+  files = {
+    include_untracked = true,
+    -- "path" | "status" | "changed_lines"
+    sort = "path",
+    -- 0 = unlimited
+    max_files = 0,
+  },
+
+  -- UI preferences
+  ui = {
+    -- "relative" | "filename_only" | "shortened"
+    path_style = "relative",
+  },
 })
 ```
 
@@ -151,7 +184,40 @@ require("zdiff").setup({
 })
 ```
 
-#### Custom keymaps
+#### Ignore whitespace and compare tips directly
+
+```lua
+require("zdiff").setup({
+  git = {
+    diff_mode = "two_dot",
+    ignore_whitespace = "all",
+  },
+})
+```
+
+#### Show line numbers and limit large previews
+
+```lua
+require("zdiff").setup({
+  diff = {
+    show_line_numbers = "both",
+    max_file_preview_lines = 300,
+  },
+})
+```
+
+#### Sort biggest diffs first and hide untracked files
+
+```lua
+require("zdiff").setup({
+  files = {
+    include_untracked = false,
+    sort = "changed_lines",
+  },
+})
+```
+
+#### Custom keymaps and path display
 
 ```lua
 require("zdiff").setup({
@@ -159,14 +225,9 @@ require("zdiff").setup({
     goto_file = "o",
     toggle = "<Space>",
   },
-})
-```
-
-#### Expand all files by default
-
-```lua
-require("zdiff").setup({
-  default_expanded = true,
+  ui = {
+    path_style = "shortened",
+  },
 })
 ```
 
