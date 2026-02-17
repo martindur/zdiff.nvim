@@ -4,6 +4,10 @@ A minimal, fast git diff viewer for Neovim with treesitter syntax highlighting.
 
 Inspired by [Zed's](https://zed.dev) multi-buffer diff view - a clean, collapsible interface for reviewing changes across multiple files in a single view.
 
+<img width="50%" height="50%" alt="image" src="https://github.com/user-attachments/assets/cb03976a-3d0c-4554-8d05-f712e030c52c" /><img width="50%" height="50%" alt="image" src="https://github.com/user-attachments/assets/f38c871a-3ca6-490a-8727-26f8275a0bf1" />
+
+
+
 ## Features
 
 - View uncommitted changes or changes compared to any git ref
