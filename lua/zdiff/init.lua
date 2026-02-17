@@ -50,6 +50,10 @@ local show_help
 ---@field default_branch string|nil Default branch for toggle_mode (e.g., "main", "develop")
 ---@field keymaps table<string, string> Keymap bindings
 ---@field icons table<string, string> Icons for UI elements
+---@field git table Git command preferences
+---@field diff table Diff display preferences
+---@field files table File list preferences
+---@field ui table UI preferences
 
 ---@type ZdiffConfig
 M.config = {
@@ -70,6 +74,23 @@ M.config = {
     deleted = "-",
     modified = "~",
   },
+  git = {
+    diff_mode = "three_dot", -- "three_dot" (base...HEAD) or "two_dot" (base..HEAD)
+    ignore_whitespace = "none", -- "none"|"eol"|"change"|"all"
+  },
+  diff = {
+    context_lines = nil, -- nil uses git/default context, number maps to -U<number>
+    show_line_numbers = "none", -- "none"|"new"|"old"|"both"
+    max_file_preview_lines = 0, -- 0 means unlimited
+  },
+  files = {
+    include_untracked = true,
+    sort = "path", -- "path"|"status"|"changed_lines"
+    max_files = 0, -- 0 means unlimited
+  },
+  ui = {
+    path_style = "relative", -- "relative"|"filename_only"|"shortened"
+  },
 }
 
 ---Send a notification with zdiff prefix
@@ -77,6 +98,168 @@ M.config = {
 ---@param level? number vim.log.levels value
 local function notify(msg, level)
   vim.notify("[zdiff] " .. msg, level or vim.log.levels.INFO)
+end
+
+---@param value string
+---@param allowed table<string, boolean>
+---@param fallback string
+---@return string
+local function normalize_enum(value, allowed, fallback)
+  if type(value) ~= "string" then
+    return fallback
+  end
+  if allowed[value] then
+    return value
+  end
+  return fallback
+end
+
+---@param value any
+---@return number|nil
+local function normalize_positive_number_or_nil(value)
+  if value == nil then
+    return nil
+  end
+  if type(value) ~= "number" then
+    return nil
+  end
+  if value < 0 then
+    return nil
+  end
+  return math.floor(value)
+end
+
+---@return string
+local function get_diff_mode_separator()
+  local git_cfg = M.config.git or {}
+  local mode = normalize_enum(git_cfg.diff_mode, {
+    two_dot = true,
+    three_dot = true,
+  }, "three_dot")
+  if mode == "two_dot" then
+    return ".."
+  end
+  return "..."
+end
+
+---@param include_context boolean
+---@return string[]
+local function get_diff_flags(include_context)
+  local flags = {}
+  local git_cfg = M.config.git or {}
+
+  local ws = normalize_enum(git_cfg.ignore_whitespace, {
+    none = true,
+    eol = true,
+    change = true,
+    all = true,
+  }, "none")
+  if ws == "eol" then
+    table.insert(flags, "--ignore-space-at-eol")
+  elseif ws == "change" then
+    table.insert(flags, "-b")
+  elseif ws == "all" then
+    table.insert(flags, "-w")
+  end
+
+  if include_context then
+    local diff_cfg = M.config.diff or {}
+    local context_lines = normalize_positive_number_or_nil(diff_cfg.context_lines)
+    if context_lines then
+      table.insert(flags, "-U" .. context_lines)
+    end
+  end
+
+  return flags
+end
+
+---@param base_ref string|nil
+---@return string[]
+local function get_diff_target(base_ref)
+  if base_ref then
+    return { vim.fn.shellescape(base_ref) .. get_diff_mode_separator() .. "HEAD" }
+  end
+  return { "HEAD" }
+end
+
+---@param filepath string
+---@return string
+local function format_path(filepath)
+  local ui_cfg = M.config.ui or {}
+  local style = normalize_enum(ui_cfg.path_style, {
+    relative = true,
+    filename_only = true,
+    shortened = true,
+  }, "relative")
+
+  if style == "filename_only" then
+    return vim.fn.fnamemodify(filepath, ":t")
+  end
+  if style == "shortened" then
+    local parts = vim.split(filepath, "/", { plain = true })
+    if #parts <= 1 then
+      return filepath
+    end
+    for i = 1, #parts - 1 do
+      if parts[i] ~= "" then
+        parts[i] = parts[i]:sub(1, 1)
+      end
+    end
+    return table.concat(parts, "/")
+  end
+  return filepath
+end
+
+---@param status string
+---@return number
+local function get_status_sort_rank(status)
+  local ranks = {
+    ["?"] = 1,
+    ["A"] = 2,
+    ["M"] = 3,
+    ["D"] = 4,
+  }
+  return ranks[status] or 99
+end
+
+---@param old_lnum number|nil
+---@param new_lnum number|nil
+---@return string, number
+local function build_line_prefix(old_lnum, new_lnum)
+  local diff_cfg = M.config.diff or {}
+  local mode = normalize_enum(diff_cfg.show_line_numbers, {
+    none = true,
+    new = true,
+    old = true,
+    both = true,
+  }, "none")
+
+  local sign = " "
+  if new_lnum and not old_lnum then
+    sign = "+"
+  elseif old_lnum and not new_lnum then
+    sign = "-"
+  end
+
+  if mode == "none" then
+    local prefix = " " .. sign
+    return prefix, #prefix
+  end
+
+  local old_txt = old_lnum and tostring(old_lnum) or ""
+  local new_txt = new_lnum and tostring(new_lnum) or ""
+  local numbers
+
+  if mode == "new" then
+    numbers = string.format("%4s ", new_txt)
+  elseif mode == "old" then
+    numbers = string.format("%4s ", old_txt)
+  else
+    numbers = string.format("%4s %4s ", old_txt, new_txt)
+  end
+
+  local prefix = numbers .. sign .. " "
+  return prefix, #prefix
 end
 
 ---Get the git root directory
@@ -93,12 +276,11 @@ end
 ---@param base_ref string|nil git ref to diff against, or nil for uncommitted
 ---@return table<string, {insertions: number, deletions: number, status: string}>
 local function get_diff_stats(base_ref)
-  local cmd
-  if base_ref then
-    cmd = "git diff --numstat " .. vim.fn.shellescape(base_ref) .. "...HEAD"
-  else
-    cmd = "git diff --numstat HEAD"
-  end
+  local flags = get_diff_flags(false)
+  local cmd_parts = { "git diff --numstat" }
+  vim.list_extend(cmd_parts, flags)
+  vim.list_extend(cmd_parts, get_diff_target(base_ref))
+  local cmd = table.concat(cmd_parts, " ")
 
   local stats = {}
   local result = vim.fn.systemlist(cmd)
@@ -118,12 +300,10 @@ local function get_diff_stats(base_ref)
   end
 
   -- Get status for each file
-  local status_cmd
-  if base_ref then
-    status_cmd = "git diff --name-status " .. vim.fn.shellescape(base_ref) .. "...HEAD"
-  else
-    status_cmd = "git diff --name-status HEAD"
-  end
+  local status_parts = { "git diff --name-status" }
+  vim.list_extend(status_parts, flags)
+  vim.list_extend(status_parts, get_diff_target(base_ref))
+  local status_cmd = table.concat(status_parts, " ")
 
   local status_result = vim.fn.systemlist(status_cmd)
   for _, line in ipairs(status_result) do
@@ -136,7 +316,8 @@ local function get_diff_stats(base_ref)
   end
 
   -- For uncommitted mode, also include untracked files
-  if not base_ref then
+  local files_cfg = M.config.files or {}
+  if not base_ref and files_cfg.include_untracked ~= false then
     local untracked_cmd = "git ls-files --others --exclude-standard"
     local untracked_result = vim.fn.systemlist(untracked_cmd)
     if vim.v.shell_error == 0 then
@@ -274,12 +455,12 @@ local function get_file_diff(filepath, base_ref, status)
     }
   end
 
-  local cmd
-  if base_ref then
-    cmd = string.format("git diff %s...HEAD -- %s", vim.fn.shellescape(base_ref), vim.fn.shellescape(filepath))
-  else
-    cmd = string.format("git diff HEAD -- %s", vim.fn.shellescape(filepath))
-  end
+  local parts = { "git diff" }
+  vim.list_extend(parts, get_diff_flags(true))
+  vim.list_extend(parts, get_diff_target(base_ref))
+  table.insert(parts, "--")
+  table.insert(parts, vim.fn.shellescape(filepath))
+  local cmd = table.concat(parts, " ")
 
   local result = vim.fn.systemlist(cmd)
   if vim.v.shell_error ~= 0 then
@@ -308,9 +489,40 @@ local function load_files(base_ref)
   end
 
   -- Sort by path
+  local files_cfg = M.config.files or {}
+  local sort_mode = normalize_enum(files_cfg.sort, {
+    path = true,
+    status = true,
+    changed_lines = true,
+  }, "path")
+
   table.sort(files, function(a, b)
+    if sort_mode == "status" then
+      local ar = get_status_sort_rank(a.status)
+      local br = get_status_sort_rank(b.status)
+      if ar ~= br then
+        return ar < br
+      end
+      return a.path < b.path
+    elseif sort_mode == "changed_lines" then
+      local achg = a.insertions + a.deletions
+      local bchg = b.insertions + b.deletions
+      if achg ~= bchg then
+        return achg > bchg
+      end
+      return a.path < b.path
+    end
     return a.path < b.path
   end)
+
+  local max_files = normalize_positive_number_or_nil(files_cfg.max_files) or 0
+  if max_files > 0 and #files > max_files then
+    local trimmed = {}
+    for i = 1, max_files do
+      trimmed[i] = files[i]
+    end
+    files = trimmed
+  end
 
   return files
 end
@@ -457,7 +669,8 @@ local function render()
       local status_icon = get_status_icon(file.status)
       local add_stat = string.format("+%d", file.insertions)
       local del_stat = string.format("-%d", file.deletions)
-      local file_line = string.format("%s %s %s  %s %s", icon, status_icon, file.path, add_stat, del_stat)
+      local display_path = format_path(file.path)
+      local file_line = string.format("%s %s %s  %s %s", icon, status_icon, display_path, add_stat, del_stat)
       table.insert(lines, file_line)
 
       -- Map this line to the file
@@ -491,7 +704,19 @@ local function render()
         local code_lines = {}
         local code_line_mapping = {} -- maps code line index to {buffer_line, prefix_len}
 
+        local diff_cfg = M.config.diff or {}
+        local max_preview = normalize_positive_number_or_nil(diff_cfg.max_file_preview_lines) or 0
+        local shown_lines = 0
+        local total_lines = 0
+        for _, hunk in ipairs(file.hunks) do
+          total_lines = total_lines + #hunk.lines
+        end
+
         for hunk_idx, hunk in ipairs(file.hunks) do
+          if max_preview > 0 and shown_lines >= max_preview then
+            break
+          end
+
           -- Hunk header
           local hunk_header = string.format(
             "  @@ -%d,%d +%d,%d @@",
@@ -506,15 +731,14 @@ local function render()
 
           -- Diff lines
           for line_idx, diff_line in ipairs(hunk.lines) do
-            local prefix = "  "
-            if diff_line.type == "add" then
-              prefix = " +"
-            elseif diff_line.type == "del" then
-              prefix = " -"
+            if max_preview > 0 and shown_lines >= max_preview then
+              break
             end
 
+            local prefix, prefix_len = build_line_prefix(diff_line.old_lnum, diff_line.new_lnum)
             local display_line = prefix .. diff_line.text
             table.insert(lines, display_line)
+            shown_lines = shown_lines + 1
 
             -- Map this line
             state.line_map[#lines] = {
@@ -530,9 +754,16 @@ local function render()
             -- Track for syntax highlighting
             if lang then
               table.insert(code_lines, diff_line.text)
-              table.insert(code_line_mapping, { buffer_line = #lines, prefix_len = #prefix })
+              table.insert(code_line_mapping, { buffer_line = #lines, prefix_len = prefix_len })
             end
           end
+        end
+
+        if max_preview > 0 and shown_lines < total_lines then
+          local hidden = total_lines - shown_lines
+          table.insert(lines, string.format("  ... %d more diff lines (expand limit)", hidden))
+          table.insert(highlights, { #lines, "Comment", 0, -1 })
+          state.line_map[#lines] = { file_idx = file_idx }
         end
 
         -- Apply syntax highlighting if we have a language
