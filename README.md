@@ -188,6 +188,12 @@ Tests use [plenary.nvim](https://github.com/nvim-lua/plenary.nvim):
 make test
 ```
 
+Stress test (async refresh + repeated open/close memory baseline check):
+
+```bash
+make stress-test
+```
+
 ## License
 
 MIT

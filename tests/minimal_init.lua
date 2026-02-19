@@ -23,3 +23,4 @@ vim.opt.rtp:prepend(vim.fn.getcwd())
 vim.cmd("runtime plugin/plenary.vim")
 vim.o.swapfile = false
 vim.o.backup = false
+vim.o.shadafile = "NONE"

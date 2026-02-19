@@ -28,6 +28,9 @@ local M = {}
 ---@field win number|nil window handle
 ---@field base_ref string|nil the git ref to diff against (nil = uncommitted changes vs HEAD)
 ---@field line_map table<number, {file_idx: number, hunk_idx: number|nil, line_idx: number|nil, lnum: number|nil}>
+---@field loading_files boolean whether file list refresh is in progress
+---@field refresh_seq number monotonically increasing refresh generation
+---@field refresh_timer uv.uv_timer_t|nil timer used for debounced refresh
 
 ---@type ZdiffState
 local state = {
@@ -36,6 +39,9 @@ local state = {
   win = nil,
   base_ref = nil,
   line_map = {},
+  loading_files = false,
+  refresh_seq = 0,
+  refresh_timer = nil,
 }
 
 -- Forward declarations
@@ -79,6 +85,51 @@ local function notify(msg, level)
   vim.notify("[zdiff] " .. msg, level or vim.log.levels.INFO)
 end
 
+local uv = vim.uv or vim.loop
+
+---@param argv string[]
+---@param callback fun(code: number, lines: string[])
+local function run_command_async(argv, callback)
+  if vim.system then
+    vim.system(argv, { text = true }, function(obj)
+      local lines = {}
+      if obj.stdout and obj.stdout ~= "" then
+        lines = vim.split(obj.stdout, "\n", { plain = true, trimempty = true })
+      end
+      vim.schedule(function()
+        callback(obj.code or 1, lines)
+      end)
+    end)
+    return
+  end
+
+  local stdout = {}
+  local job_id = vim.fn.jobstart(argv, {
+    stdout_buffered = true,
+    on_stdout = function(_, data)
+      if data then
+        stdout = data
+      end
+    end,
+    on_exit = function(_, code)
+      vim.schedule(function()
+        local lines = {}
+        for _, line in ipairs(stdout) do
+          if line ~= "" then
+            table.insert(lines, line)
+          end
+        end
+        callback(code or 1, lines)
+      end)
+    end,
+  })
+  if job_id <= 0 then
+    vim.schedule(function()
+      callback(1, {})
+    end)
+  end
+end
+
 ---Get the git root directory
 ---@return string|nil
 local function get_git_root()
@@ -89,81 +140,78 @@ local function get_git_root()
   return result[1]
 end
 
----Parse the diff stat output to get file statistics
+---@param rel_path string
+---@return number
+local function count_file_lines(rel_path)
+  local git_root = get_git_root()
+  if not git_root then
+    return 0
+  end
+  local filepath = git_root .. "/" .. rel_path
+  local line_count = 0
+  local file = io.open(filepath, "r")
+  if file then
+    for _ in file:lines() do
+      line_count = line_count + 1
+    end
+    file:close()
+  end
+  return line_count
+end
+
+---Asynchronously parse git diff stats output
 ---@param base_ref string|nil git ref to diff against, or nil for uncommitted
----@return table<string, {insertions: number, deletions: number, status: string}>
-local function get_diff_stats(base_ref)
-  local cmd
+---@param done fun(stats: table<string, {insertions: number, deletions: number, status: string}>)
+local function get_diff_stats_async(base_ref, done)
+  local diff_target
   if base_ref then
-    cmd = "git diff --numstat " .. vim.fn.shellescape(base_ref) .. "...HEAD"
+    diff_target = base_ref .. "...HEAD"
   else
-    cmd = "git diff --numstat HEAD"
+    diff_target = "HEAD"
   end
 
   local stats = {}
-  local result = vim.fn.systemlist(cmd)
-  if vim.v.shell_error ~= 0 then
-    return stats
-  end
-
-  for _, line in ipairs(result) do
-    local ins, del, path = line:match("^(%d+)%s+(%d+)%s+(.+)$")
-    if path then
-      stats[path] = {
-        insertions = tonumber(ins) or 0,
-        deletions = tonumber(del) or 0,
-        status = "M",
-      }
-    end
-  end
-
-  -- Get status for each file
-  local status_cmd
-  if base_ref then
-    status_cmd = "git diff --name-status " .. vim.fn.shellescape(base_ref) .. "...HEAD"
-  else
-    status_cmd = "git diff --name-status HEAD"
-  end
-
-  local status_result = vim.fn.systemlist(status_cmd)
-  for _, line in ipairs(status_result) do
-    local status, path = line:match("^(%a)%s+(.+)$")
-    if path and stats[path] then
-      stats[path].status = status
-    elseif path then
-      stats[path] = { insertions = 0, deletions = 0, status = status }
-    end
-  end
-
-  -- For uncommitted mode, also include untracked files
-  if not base_ref then
-    local untracked_cmd = "git ls-files --others --exclude-standard"
-    local untracked_result = vim.fn.systemlist(untracked_cmd)
-    if vim.v.shell_error == 0 then
-      for _, path in ipairs(untracked_result) do
-        if path ~= "" and not stats[path] then
-          -- Count lines in the new file
-          local git_root = get_git_root()
-          local filepath = git_root .. "/" .. path
-          local line_count = 0
-          local file = io.open(filepath, "r")
-          if file then
-            for _ in file:lines() do
-              line_count = line_count + 1
-            end
-            file:close()
-          end
-          stats[path] = {
-            insertions = line_count,
-            deletions = 0,
-            status = "?", -- untracked
-          }
-        end
+  run_command_async({ "git", "diff", "--numstat", diff_target }, function(_, result)
+    for _, line in ipairs(result) do
+      local ins, del, path = line:match("^(%d+)%s+(%d+)%s+(.+)$")
+      if path then
+        stats[path] = {
+          insertions = tonumber(ins) or 0,
+          deletions = tonumber(del) or 0,
+          status = "M",
+        }
       end
     end
-  end
 
-  return stats
+    run_command_async({ "git", "diff", "--name-status", diff_target }, function(_, status_result)
+      for _, line in ipairs(status_result) do
+        local status, path = line:match("^(%a)%s+(.+)$")
+        if path and stats[path] then
+          stats[path].status = status
+        elseif path then
+          stats[path] = { insertions = 0, deletions = 0, status = status }
+        end
+      end
+
+      if base_ref then
+        done(stats)
+        return
+      end
+
+      run_command_async({ "git", "ls-files", "--others", "--exclude-standard" }, function(_, untracked_result)
+        for _, path in ipairs(untracked_result) do
+          if path ~= "" and not stats[path] then
+            stats[path] = {
+              insertions = count_file_lines(path),
+              deletions = 0,
+              status = "?",
+            }
+          end
+        end
+        done(stats)
+      end)
+    end)
+  end)
 end
 
 ---Parse a unified diff hunk header
@@ -289,30 +337,29 @@ local function get_file_diff(filepath, base_ref, status)
   return parse_diff_hunks(result)
 end
 
----Load all changed files and their stats
 ---@param base_ref string|nil git ref to diff against, or nil for uncommitted
----@return ZdiffFile[]
-local function load_files(base_ref)
-  local stats = get_diff_stats(base_ref)
-  local files = {}
+---@param done fun(files: ZdiffFile[])
+local function load_files_async(base_ref, done)
+  get_diff_stats_async(base_ref, function(stats)
+    local files = {}
 
-  for path, info in pairs(stats) do
-    table.insert(files, {
-      path = path,
-      status = info.status,
-      insertions = info.insertions,
-      deletions = info.deletions,
-      expanded = M.config.default_expanded,
-      hunks = {},
-    })
-  end
+    for path, info in pairs(stats) do
+      table.insert(files, {
+        path = path,
+        status = info.status,
+        insertions = info.insertions,
+        deletions = info.deletions,
+        expanded = M.config.default_expanded,
+        hunks = {},
+      })
+    end
 
-  -- Sort by path
-  table.sort(files, function(a, b)
-    return a.path < b.path
+    table.sort(files, function(a, b)
+      return a.path < b.path
+    end)
+
+    done(files)
   end)
-
-  return files
 end
 
 ---Get the status icon for a file
@@ -441,6 +488,9 @@ local function render()
   else
     mode_text = "Uncommitted changes"
   end
+  if state.loading_files then
+    mode_text = mode_text .. " (loading...)"
+  end
   table.insert(lines, string.format(" zdiff: %s", mode_text))
   table.insert(lines, string.rep("-", 60))
   table.insert(highlights, { #lines - 1, "Title", 0, -1 })
@@ -448,7 +498,11 @@ local function render()
 
   if #state.files == 0 then
     table.insert(lines, "")
-    table.insert(lines, "  No changes found")
+    if state.loading_files then
+      table.insert(lines, "  Loading changed files...")
+    else
+      table.insert(lines, "  No changes found")
+    end
     table.insert(highlights, { #lines, "Comment", 0, -1 })
   else
     for file_idx, file in ipairs(state.files) do
@@ -753,24 +807,57 @@ local function refresh()
     expanded_state[file.path] = file.expanded
   end
 
-  -- Reload files
-  state.files = load_files(state.base_ref)
-
-  -- Restore expanded state
-  for _, file in ipairs(state.files) do
-    if expanded_state[file.path] ~= nil then
-      file.expanded = expanded_state[file.path]
-    end
-  end
-
+  state.refresh_seq = state.refresh_seq + 1
+  local refresh_seq = state.refresh_seq
+  state.loading_files = true
   render()
 
-  -- Restore cursor position (clamped to valid range)
-  if cursor_line and state.win and vim.api.nvim_win_is_valid(state.win) then
-    local line_count = vim.api.nvim_buf_line_count(state.buf)
-    cursor_line = math.min(cursor_line, line_count)
-    vim.api.nvim_win_set_cursor(state.win, { cursor_line, 0 })
+  load_files_async(state.base_ref, function(files)
+    if refresh_seq ~= state.refresh_seq then
+      return
+    end
+
+    state.files = files
+    for _, file in ipairs(state.files) do
+      if expanded_state[file.path] ~= nil then
+        file.expanded = expanded_state[file.path]
+      end
+    end
+
+    state.loading_files = false
+    render()
+
+    -- Restore cursor position (clamped to valid range)
+    if cursor_line and state.win and vim.api.nvim_win_is_valid(state.win) then
+      local line_count = vim.api.nvim_buf_line_count(state.buf)
+      cursor_line = math.min(cursor_line, line_count)
+      vim.api.nvim_win_set_cursor(state.win, { cursor_line, 0 })
+    end
+  end)
+end
+
+---@param delay_ms number
+local function refresh_debounced(delay_ms)
+  if state.refresh_timer then
+    state.refresh_timer:stop()
+    state.refresh_timer:close()
+    state.refresh_timer = nil
   end
+
+  local timer = uv.new_timer()
+  state.refresh_timer = timer
+  timer:start(delay_ms, 0, function()
+    timer:stop()
+    timer:close()
+    if state.refresh_timer == timer then
+      state.refresh_timer = nil
+    end
+    vim.schedule(function()
+      if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
+        refresh()
+      end
+    end)
+  end)
 end
 
 ---Toggle between uncommitted and branch mode
@@ -791,11 +878,18 @@ end
 
 ---Close the zdiff window and wipe the buffer
 local function close()
+  if state.refresh_timer then
+    state.refresh_timer:stop()
+    state.refresh_timer:close()
+    state.refresh_timer = nil
+  end
   if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
     vim.api.nvim_buf_delete(state.buf, { force = true })
   end
   state.buf = nil
   state.win = nil
+  state.loading_files = false
+  state.refresh_seq = state.refresh_seq + 1
 end
 
 ---Create the zdiff buffer and window
@@ -866,7 +960,10 @@ function M.open(base_ref)
     buffer = state.buf,
     callback = function()
       state.win = vim.api.nvim_get_current_win()
-      refresh()
+      if state.loading_files then
+        return
+      end
+      refresh_debounced(200)
     end,
   })
 
