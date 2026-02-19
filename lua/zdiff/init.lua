@@ -87,11 +87,11 @@ end
 
 local uv = vim.uv or vim.loop
 
----@param cmd string
+---@param argv string[]
 ---@param callback fun(code: number, lines: string[])
-local function run_command_async(cmd, callback)
+local function run_command_async(argv, callback)
   if vim.system then
-    vim.system({ "sh", "-c", cmd }, { text = true }, function(obj)
+    vim.system(argv, { text = true }, function(obj)
       local lines = {}
       if obj.stdout and obj.stdout ~= "" then
         lines = vim.split(obj.stdout, "\n", { plain = true, trimempty = true })
@@ -104,7 +104,7 @@ local function run_command_async(cmd, callback)
   end
 
   local stdout = {}
-  local job_id = vim.fn.jobstart(cmd, {
+  local job_id = vim.fn.jobstart(argv, {
     stdout_buffered = true,
     on_stdout = function(_, data)
       if data then
@@ -163,15 +163,15 @@ end
 ---@param base_ref string|nil git ref to diff against, or nil for uncommitted
 ---@param done fun(stats: table<string, {insertions: number, deletions: number, status: string}>)
 local function get_diff_stats_async(base_ref, done)
-  local cmd
+  local diff_target
   if base_ref then
-    cmd = "git diff --numstat " .. vim.fn.shellescape(base_ref) .. "...HEAD"
+    diff_target = base_ref .. "...HEAD"
   else
-    cmd = "git diff --numstat HEAD"
+    diff_target = "HEAD"
   end
 
   local stats = {}
-  run_command_async(cmd, function(_, result)
+  run_command_async({ "git", "diff", "--numstat", diff_target }, function(_, result)
     for _, line in ipairs(result) do
       local ins, del, path = line:match("^(%d+)%s+(%d+)%s+(.+)$")
       if path then
@@ -183,14 +183,7 @@ local function get_diff_stats_async(base_ref, done)
       end
     end
 
-    local status_cmd
-    if base_ref then
-      status_cmd = "git diff --name-status " .. vim.fn.shellescape(base_ref) .. "...HEAD"
-    else
-      status_cmd = "git diff --name-status HEAD"
-    end
-
-    run_command_async(status_cmd, function(_, status_result)
+    run_command_async({ "git", "diff", "--name-status", diff_target }, function(_, status_result)
       for _, line in ipairs(status_result) do
         local status, path = line:match("^(%a)%s+(.+)$")
         if path and stats[path] then
@@ -205,7 +198,7 @@ local function get_diff_stats_async(base_ref, done)
         return
       end
 
-      run_command_async("git ls-files --others --exclude-standard", function(_, untracked_result)
+      run_command_async({ "git", "ls-files", "--others", "--exclude-standard" }, function(_, untracked_result)
         for _, path in ipairs(untracked_result) do
           if path ~= "" and not stats[path] then
             stats[path] = {
