@@ -142,6 +142,16 @@ require("zdiff").setup({
     deleted = "-",
     modified = "~",
   },
+
+  -- Syntax highlighting strategy
+  syntax = {
+    -- "projection" parses old/new full-file snapshots and projects
+    -- captures onto unified diff lines. "hunk" keeps legacy behavior.
+    mode = "projection",
+    -- Skip projection when either old/new source exceeds this many lines.
+    -- 0 means unlimited.
+    max_lines = 8000,
+  },
 })
 ```
 
@@ -174,6 +184,18 @@ require("zdiff").setup({
 })
 ```
 
+#### Limit projection on very large files
+
+```lua
+require("zdiff").setup({
+  syntax = {
+    -- Files above this line count skip projection and use
+    -- hunk-based syntax highlighting for performance.
+    max_lines = 12000,
+  },
+})
+```
+
 ## Health Check
 
 Run `:checkhealth zdiff` to verify your setup.
@@ -188,7 +210,7 @@ Tests use [plenary.nvim](https://github.com/nvim-lua/plenary.nvim):
 make test
 ```
 
-Stress test (async refresh + repeated open/close memory baseline check):
+Stress test (async refresh + repeated open/close memory baseline check + open-time load benchmark):
 
 ```bash
 make stress-test
