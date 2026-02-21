@@ -601,9 +601,11 @@ local function render()
             hunk.new_start,
             hunk.new_count
           )
-          table.insert(lines, hunk_header)
+          -- Keep git metadata out of buffer text; render as virtual text instead.
+          table.insert(lines, "  ")
           state.line_map[#lines] = { file_idx = file_idx, hunk_idx = hunk_idx }
           table.insert(highlights, { #lines, "Comment", 0, -1 })
+          table.insert(markers, { #lines, hunk_header, "Comment" })
 
           -- Diff lines
           for line_idx, diff_line in ipairs(hunk.lines) do
