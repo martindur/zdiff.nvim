@@ -21,6 +21,10 @@ describe("zdiff", function()
         deleted = "-",
         modified = "~",
       },
+      syntax = {
+        mode = "projection",
+        max_lines = 8000,
+      },
     }
   end)
 
@@ -42,6 +46,8 @@ describe("zdiff", function()
       assert.equals(false, zdiff.config.default_expanded)
       assert.equals("main", zdiff.config.default_branch)
       assert.equals("<CR>", zdiff.config.keymaps.goto_file)
+      assert.equals("projection", zdiff.config.syntax.mode)
+      assert.equals(8000, zdiff.config.syntax.max_lines)
     end)
 
     it("should merge user config with defaults", function()
@@ -78,6 +84,17 @@ describe("zdiff", function()
       assert.equals("v", zdiff.config.icons.expanded)
       -- Should preserve other icons
       assert.equals("+", zdiff.config.icons.added)
+    end)
+
+    it("should allow overriding syntax config", function()
+      zdiff.setup({
+        syntax = {
+          mode = "hunk",
+          max_lines = 1000,
+        },
+      })
+      assert.equals("hunk", zdiff.config.syntax.mode)
+      assert.equals(1000, zdiff.config.syntax.max_lines)
     end)
   end)
 

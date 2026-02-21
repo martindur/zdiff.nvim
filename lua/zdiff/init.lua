@@ -32,6 +32,9 @@ local M = {}
 ---@field refresh_seq number monotonically increasing refresh generation
 ---@field refresh_timer uv.uv_timer_t|nil timer used for debounced refresh
 ---@field win_opts table<number, {number: boolean, relativenumber: boolean, signcolumn: string, wrap: boolean, cursorline: boolean}>
+---@field syntax_projection_cache table<string, {old: table<number, table[]>, new: table<number, table[]>}|false>
+---@field syntax_jobs table<string, integer>
+---@field syntax_job_seq integer
 
 ---@type ZdiffState
 local state = {
@@ -44,6 +47,9 @@ local state = {
   refresh_seq = 0,
   refresh_timer = nil,
   win_opts = {},
+  syntax_projection_cache = {},
+  syntax_jobs = {},
+  syntax_job_seq = 0,
 }
 
 -- Forward declarations
@@ -51,6 +57,7 @@ local goto_source
 local toggle_expand
 local toggle_mode
 local show_help
+local render
 
 -- Configuration
 ---@class ZdiffConfig
@@ -58,6 +65,7 @@ local show_help
 ---@field default_branch string|nil Default branch for toggle_mode (e.g., "main", "develop")
 ---@field keymaps table<string, string> Keymap bindings
 ---@field icons table<string, string> Icons for UI elements
+---@field syntax table Syntax highlight preferences
 
 ---@type ZdiffConfig
 M.config = {
@@ -78,6 +86,10 @@ M.config = {
     deleted = "-",
     modified = "~",
   },
+  syntax = {
+    mode = "projection", -- "projection"|"hunk"
+    max_lines = 8000, -- 0 means unlimited
+  },
 }
 
 ---Send a notification with zdiff prefix
@@ -85,6 +97,29 @@ M.config = {
 ---@param level? number vim.log.levels value
 local function notify(msg, level)
   vim.notify("[zdiff] " .. msg, level or vim.log.levels.INFO)
+end
+
+---@param value string
+---@param allowed table<string, boolean>
+---@param fallback string
+---@return string
+local function normalize_enum(value, allowed, fallback)
+  if type(value) ~= "string" then
+    return fallback
+  end
+  if allowed[value] then
+    return value
+  end
+  return fallback
+end
+
+---@param value any
+---@return number
+local function normalize_non_negative_number(value)
+  if type(value) ~= "number" or value < 0 then
+    return 0
+  end
+  return math.floor(value)
 end
 
 ---@param win number
@@ -511,8 +546,192 @@ local function get_syntax_highlights(code, lang)
   return highlights
 end
 
+---@param filepath string
+---@return string[]
+local function read_worktree_lines(filepath)
+  local git_root = get_git_root()
+  if not git_root then
+    return {}
+  end
+  local full_path = git_root .. "/" .. filepath
+  local file = io.open(full_path, "r")
+  if not file then
+    return {}
+  end
+  local lines = {}
+  for line in file:lines() do
+    table.insert(lines, line)
+  end
+  file:close()
+  return lines
+end
+
+---@param rev string
+---@param filepath string
+---@param done fun(lines: string[])
+local function read_git_file_lines_async(rev, filepath, done)
+  run_command_async({ "git", "show", rev .. ":" .. filepath }, function(code, lines)
+    if code ~= 0 then
+      done({})
+      return
+    end
+    done(lines)
+  end)
+end
+
+---@param file ZdiffFile
+---@param side "old"|"new"
+---@return "empty"|"worktree"|"git", string|nil
+local function get_content_source(file, side)
+  local status = file.status
+  if side == "old" then
+    if status == "A" or status == "?" then
+      return "empty", nil
+    end
+    if state.base_ref then
+      return "git", state.base_ref
+    end
+    return "git", "HEAD"
+  end
+
+  if status == "D" then
+    return "empty", nil
+  end
+  if state.base_ref then
+    return "git", "HEAD"
+  end
+  return "worktree", nil
+end
+
+---@param file ZdiffFile
+---@param done fun(old_lines: string[], new_lines: string[])
+local function get_projection_sources_async(file, done)
+  local old_kind, old_rev = get_content_source(file, "old")
+  local new_kind, new_rev = get_content_source(file, "new")
+
+  local function load_new(old_lines)
+    if new_kind == "empty" then
+      done(old_lines, {})
+      return
+    end
+    if new_kind == "worktree" then
+      done(old_lines, read_worktree_lines(file.path))
+      return
+    end
+    read_git_file_lines_async(new_rev, file.path, function(new_lines)
+      done(old_lines, new_lines)
+    end)
+  end
+
+  if old_kind == "empty" then
+    load_new({})
+    return
+  end
+  if old_kind == "worktree" then
+    load_new(read_worktree_lines(file.path))
+    return
+  end
+  read_git_file_lines_async(old_rev, file.path, function(old_lines)
+    load_new(old_lines)
+  end)
+end
+
+---@param code string[]
+---@param lang string
+---@return table<number, table[]>
+local function build_syntax_line_map(code, lang)
+  local mapped = {}
+  local captures = get_syntax_highlights(code, lang)
+  for _, cap in ipairs(captures) do
+    mapped[cap.line] = mapped[cap.line] or {}
+    table.insert(mapped[cap.line], {
+      hl_group = cap.hl_group,
+      col_start = cap.col_start,
+      col_end = cap.col_end,
+    })
+  end
+  return mapped
+end
+
+---@param old_lines string[]
+---@param new_lines string[]
+---@param lang string
+---@return {old: table<number, table[]>, new: table<number, table[]>}|nil
+local function build_projection_cache(old_lines, new_lines, lang)
+  local syntax_cfg = M.config.syntax or {}
+  local max_lines = normalize_non_negative_number(syntax_cfg.max_lines)
+  if max_lines > 0 and (#old_lines > max_lines or #new_lines > max_lines) then
+    return nil
+  end
+
+  return {
+    old = build_syntax_line_map(old_lines, lang),
+    new = build_syntax_line_map(new_lines, lang),
+  }
+end
+
+---@param file ZdiffFile
+---@return string
+local function get_syntax_cache_key(file)
+  local pieces = {
+    state.base_ref or "",
+    file.path,
+    file.status,
+    tostring(file.insertions),
+    tostring(file.deletions),
+    tostring(#file.hunks),
+  }
+  for _, hunk in ipairs(file.hunks) do
+    table.insert(
+      pieces,
+      string.format("%d:%d:%d:%d:%d", hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count, #hunk.lines)
+    )
+    for _, line in ipairs(hunk.lines) do
+      table.insert(pieces, line.type .. ":" .. line.text)
+    end
+  end
+  local raw = table.concat(pieces, "\n")
+  local ok, hash = pcall(vim.fn.sha256, raw)
+  if ok and hash and hash ~= "" then
+    return hash
+  end
+  return raw
+end
+
+---@param key string
+---@param file ZdiffFile
+---@param lang string
+local function queue_projection_cache(key, file, lang)
+  if state.syntax_projection_cache[key] or state.syntax_jobs[key] then
+    return
+  end
+
+  state.syntax_job_seq = state.syntax_job_seq + 1
+  local token = state.syntax_job_seq
+  state.syntax_jobs[key] = token
+  local refresh_seq = state.refresh_seq
+
+  local function finish(cache)
+    if state.syntax_jobs[key] ~= token then
+      return
+    end
+    state.syntax_jobs[key] = nil
+    if refresh_seq ~= state.refresh_seq then
+      return
+    end
+    state.syntax_projection_cache[key] = cache or false
+    if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
+      render()
+    end
+  end
+
+  get_projection_sources_async(file, function(old_lines, new_lines)
+    finish(build_projection_cache(old_lines, new_lines, lang))
+  end)
+end
+
 ---Render the zdiff buffer
-local function render()
+render = function()
   if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
     return
   end
@@ -522,6 +741,9 @@ local function render()
   local lines = {}
   local highlights = {} -- {line_idx, hl_group, col_start, col_end}
   local syntax_highlights = {} -- collected after we know line positions
+  local syntax_requests = {}
+  local syntax_cfg = M.config.syntax or {}
+  local syntax_mode = normalize_enum(syntax_cfg.mode, { projection = true, hunk = true }, "projection")
   state.line_map = {}
 
   -- Header
@@ -584,9 +806,10 @@ local function render()
         -- Get language for syntax highlighting
         local lang = get_lang_from_path(file.path)
 
-        -- Collect all code lines and their buffer positions for syntax highlighting
+        -- Collect diff-line mappings for syntax projection and hunk fallback.
         local code_lines = {}
         local code_line_mapping = {} -- maps code line index to {buffer_line, prefix_len}
+        local projection_lines = {}
 
         for hunk_idx, hunk in ipairs(file.hunks) do
           -- Hunk header
@@ -626,6 +849,15 @@ local function render()
 
             -- Track for syntax highlighting
             if lang then
+              local source_side = diff_line.type == "del" and "old" or "new"
+              table.insert(projection_lines, {
+                buffer_line = #lines,
+                prefix_len = #prefix,
+                source_side = source_side,
+                old_lnum = diff_line.old_lnum,
+                new_lnum = diff_line.new_lnum,
+              })
+
               table.insert(code_lines, diff_line.text)
               table.insert(code_line_mapping, { buffer_line = #lines, prefix_len = #prefix })
             end
@@ -633,20 +865,49 @@ local function render()
         end
 
         -- Apply syntax highlighting if we have a language
-        if lang and #code_lines > 0 then
-          local syn_hls = get_syntax_highlights(code_lines, lang)
-          for _, hl in ipairs(syn_hls) do
-            local mapping = code_line_mapping[hl.line]
-            if mapping then
-              -- Offset columns by prefix length
-              local col_start = mapping.prefix_len + hl.col_start
-              local col_end = hl.col_end == -1 and -1 or (mapping.prefix_len + hl.col_end)
-              table.insert(syntax_highlights, {
-                mapping.buffer_line,
-                hl.hl_group,
-                col_start,
-                col_end,
-              })
+        if lang then
+          local used_projection = false
+          if syntax_mode == "projection" and #projection_lines > 0 then
+            local cache_key = get_syntax_cache_key(file)
+            local projection = state.syntax_projection_cache[cache_key]
+            if projection then
+              for _, line_info in ipairs(projection_lines) do
+                local side_map = line_info.source_side == "old" and projection.old or projection.new
+                local side_lnum = line_info.source_side == "old" and line_info.old_lnum or line_info.new_lnum
+                if side_lnum and side_map[side_lnum] then
+                  for _, cap in ipairs(side_map[side_lnum]) do
+                    local col_start = line_info.prefix_len + cap.col_start
+                    local col_end = cap.col_end == -1 and -1 or (line_info.prefix_len + cap.col_end)
+                    table.insert(syntax_highlights, {
+                      line_info.buffer_line,
+                      cap.hl_group,
+                      col_start,
+                      col_end,
+                    })
+                  end
+                end
+              end
+              used_projection = true
+            elseif projection == nil then
+              table.insert(syntax_requests, { key = cache_key, file = file, lang = lang })
+            end
+          end
+
+          if (not used_projection) and #code_lines > 0 then
+            local syn_hls = get_syntax_highlights(code_lines, lang)
+            for _, hl in ipairs(syn_hls) do
+              local mapping = code_line_mapping[hl.line]
+              if mapping then
+                -- Offset columns by prefix length
+                local col_start = mapping.prefix_len + hl.col_start
+                local col_end = hl.col_end == -1 and -1 or (mapping.prefix_len + hl.col_end)
+                table.insert(syntax_highlights, {
+                  mapping.buffer_line,
+                  hl.hl_group,
+                  col_start,
+                  col_end,
+                })
+              end
             end
           end
         end
@@ -674,6 +935,11 @@ local function render()
   end
 
   vim.bo[state.buf].modifiable = false
+
+  -- Queue syntax projection jobs after first paint for responsive rendering.
+  for _, req in ipairs(syntax_requests) do
+    queue_projection_cache(req.key, req.file, req.lang)
+  end
 end
 
 ---Toggle expand/collapse for file under cursor
@@ -856,6 +1122,8 @@ local function refresh()
   state.refresh_seq = state.refresh_seq + 1
   local refresh_seq = state.refresh_seq
   state.loading_files = true
+  state.syntax_jobs = {}
+  state.syntax_projection_cache = {}
   render()
 
   load_files_async(state.base_ref, function(files)
@@ -939,6 +1207,8 @@ local function close()
   state.win = nil
   state.loading_files = false
   state.refresh_seq = state.refresh_seq + 1
+  state.syntax_jobs = {}
+  state.syntax_projection_cache = {}
 end
 
 ---Create the zdiff buffer and window
@@ -1038,6 +1308,14 @@ end
 -- Expose for debugging/testing
 M.show_help = function()
   show_help()
+end
+
+M._debug_state = function()
+  return {
+    loading_files = state.loading_files,
+    pending_syntax_jobs = vim.tbl_count(state.syntax_jobs),
+    syntax_cache_entries = vim.tbl_count(state.syntax_projection_cache),
+  }
 end
 
 return M
