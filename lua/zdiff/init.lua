@@ -129,6 +129,9 @@ local function restore_window_opts(win)
 end
 
 local uv = vim.uv or vim.loop
+local ns_diff = vim.api.nvim_create_namespace("zdiff")
+local ns_syntax = vim.api.nvim_create_namespace("zdiff_syntax")
+local ns_markers = vim.api.nvim_create_namespace("zdiff_markers")
 
 ---@param argv string[]
 ---@param callback fun(code: number, lines: string[])
@@ -522,6 +525,7 @@ local function render()
   local lines = {}
   local highlights = {} -- {line_idx, hl_group, col_start, col_end}
   local syntax_highlights = {} -- collected after we know line positions
+  local markers = {} -- {line_idx, text, hl_group}
   state.line_map = {}
 
   -- Header
@@ -597,19 +601,15 @@ local function render()
             hunk.new_start,
             hunk.new_count
           )
-          table.insert(lines, hunk_header)
+          -- Keep git metadata out of buffer text; render as virtual text instead.
+          table.insert(lines, "  ")
           state.line_map[#lines] = { file_idx = file_idx, hunk_idx = hunk_idx }
           table.insert(highlights, { #lines, "Comment", 0, -1 })
+          table.insert(markers, { #lines, hunk_header, "Comment" })
 
           -- Diff lines
           for line_idx, diff_line in ipairs(hunk.lines) do
             local prefix = "  "
-            if diff_line.type == "add" then
-              prefix = " +"
-            elseif diff_line.type == "del" then
-              prefix = " -"
-            end
-
             local display_line = prefix .. diff_line.text
             table.insert(lines, display_line)
 
@@ -623,6 +623,13 @@ local function render()
 
             -- Add diff background highlight
             table.insert(highlights, { #lines, get_line_highlight(diff_line.type), 0, -1 })
+
+            -- Render +/- markers as virtual text so they are not part of buffer content
+            if diff_line.type == "add" then
+              table.insert(markers, { #lines, " " .. M.config.icons.added, "Comment" })
+            elseif diff_line.type == "del" then
+              table.insert(markers, { #lines, " " .. M.config.icons.deleted, "Comment" })
+            end
 
             -- Track for syntax highlighting
             if lang then
@@ -658,19 +665,28 @@ local function render()
   vim.api.nvim_buf_set_lines(state.buf, 0, -1, false, lines)
 
   -- Apply diff highlights first (background)
-  local ns = vim.api.nvim_create_namespace("zdiff")
-  vim.api.nvim_buf_clear_namespace(state.buf, ns, 0, -1)
+  vim.api.nvim_buf_clear_namespace(state.buf, ns_diff, 0, -1)
   for _, hl in ipairs(highlights) do
     local line_idx, hl_group, col_start, col_end = hl[1], hl[2], hl[3], hl[4]
-    vim.api.nvim_buf_add_highlight(state.buf, ns, hl_group, line_idx - 1, col_start, col_end)
+    vim.api.nvim_buf_add_highlight(state.buf, ns_diff, hl_group, line_idx - 1, col_start, col_end)
   end
 
   -- Apply syntax highlights on top (foreground colors)
-  local ns_syntax = vim.api.nvim_create_namespace("zdiff_syntax")
   vim.api.nvim_buf_clear_namespace(state.buf, ns_syntax, 0, -1)
   for _, hl in ipairs(syntax_highlights) do
     local line_idx, hl_group, col_start, col_end = hl[1], hl[2], hl[3], hl[4]
     vim.api.nvim_buf_add_highlight(state.buf, ns_syntax, hl_group, line_idx - 1, col_start, col_end)
+  end
+
+  -- Apply virtual +/- markers in the left padding columns
+  vim.api.nvim_buf_clear_namespace(state.buf, ns_markers, 0, -1)
+  for _, marker in ipairs(markers) do
+    local line_idx, text, hl_group = marker[1], marker[2], marker[3]
+    vim.api.nvim_buf_set_extmark(state.buf, ns_markers, line_idx - 1, 0, {
+      virt_text = { { text, hl_group } },
+      virt_text_pos = "overlay",
+      priority = 200,
+    })
   end
 
   vim.bo[state.buf].modifiable = false
