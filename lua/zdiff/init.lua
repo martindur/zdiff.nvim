@@ -31,6 +31,7 @@ local M = {}
 ---@field loading_files boolean whether file list refresh is in progress
 ---@field refresh_seq number monotonically increasing refresh generation
 ---@field refresh_timer uv.uv_timer_t|nil timer used for debounced refresh
+---@field win_opts table<number, {number: boolean, relativenumber: boolean, signcolumn: string, wrap: boolean, cursorline: boolean}>
 
 ---@type ZdiffState
 local state = {
@@ -42,6 +43,7 @@ local state = {
   loading_files = false,
   refresh_seq = 0,
   refresh_timer = nil,
+  win_opts = {},
 }
 
 -- Forward declarations
@@ -83,6 +85,47 @@ M.config = {
 ---@param level? number vim.log.levels value
 local function notify(msg, level)
   vim.notify("[zdiff] " .. msg, level or vim.log.levels.INFO)
+end
+
+---@param win number
+local function save_window_opts(win)
+  if state.win_opts[win] or not vim.api.nvim_win_is_valid(win) then
+    return
+  end
+  state.win_opts[win] = {
+    number = vim.wo[win].number,
+    relativenumber = vim.wo[win].relativenumber,
+    signcolumn = vim.wo[win].signcolumn,
+    wrap = vim.wo[win].wrap,
+    cursorline = vim.wo[win].cursorline,
+  }
+end
+
+---@param win number
+local function apply_zdiff_window_opts(win)
+  if not vim.api.nvim_win_is_valid(win) then
+    return
+  end
+  vim.wo[win].number = false
+  vim.wo[win].relativenumber = false
+  vim.wo[win].signcolumn = "no"
+  vim.wo[win].wrap = false
+  vim.wo[win].cursorline = true
+end
+
+---@param win number
+local function restore_window_opts(win)
+  local opts = state.win_opts[win]
+  if not opts or not vim.api.nvim_win_is_valid(win) then
+    state.win_opts[win] = nil
+    return
+  end
+  vim.wo[win].number = opts.number
+  vim.wo[win].relativenumber = opts.relativenumber
+  vim.wo[win].signcolumn = opts.signcolumn
+  vim.wo[win].wrap = opts.wrap
+  vim.wo[win].cursorline = opts.cursorline
+  state.win_opts[win] = nil
 end
 
 local uv = vim.uv or vim.loop
@@ -687,6 +730,9 @@ goto_source = function()
 
   -- Open file in the zdiff window (replaces zdiff buffer, but buffer persists hidden)
   -- This adds to jumplist so C-o returns to zdiff
+  if state.win and vim.api.nvim_win_is_valid(state.win) then
+    restore_window_opts(state.win)
+  end
   vim.cmd("edit " .. vim.fn.fnameescape(filepath))
   vim.api.nvim_win_set_cursor(0, { target_line, 0 })
   vim.cmd("normal! zz") -- Center the line
@@ -883,6 +929,9 @@ local function close()
     state.refresh_timer:close()
     state.refresh_timer = nil
   end
+  for win, _ in pairs(state.win_opts) do
+    restore_window_opts(win)
+  end
   if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
     vim.api.nvim_buf_delete(state.buf, { force = true })
   end
@@ -940,11 +989,8 @@ function M.open(base_ref)
   vim.api.nvim_win_set_buf(state.win, state.buf)
 
   -- Window options
-  vim.wo[state.win].number = false
-  vim.wo[state.win].relativenumber = false
-  vim.wo[state.win].signcolumn = "no"
-  vim.wo[state.win].wrap = false
-  vim.wo[state.win].cursorline = true
+  save_window_opts(state.win)
+  apply_zdiff_window_opts(state.win)
 
   -- Set up keymaps
   local opts = { buffer = state.buf, silent = true }
@@ -960,10 +1006,20 @@ function M.open(base_ref)
     buffer = state.buf,
     callback = function()
       state.win = vim.api.nvim_get_current_win()
+      save_window_opts(state.win)
+      apply_zdiff_window_opts(state.win)
       if state.loading_files then
         return
       end
       refresh_debounced(200)
+    end,
+  })
+
+  vim.api.nvim_create_autocmd("BufLeave", {
+    buffer = state.buf,
+    callback = function()
+      local win = vim.api.nvim_get_current_win()
+      restore_window_opts(win)
     end,
   })
 
