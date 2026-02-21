@@ -167,12 +167,21 @@ local uv = vim.uv or vim.loop
 
 ---@param argv string[]
 ---@param callback fun(code: number, lines: string[])
-local function run_command_async(argv, callback)
+---@param opts? {preserve_empty_lines?: boolean}
+local function run_command_async(argv, callback, opts)
+  local preserve_empty_lines = opts and opts.preserve_empty_lines == true
   if vim.system then
     vim.system(argv, { text = true }, function(obj)
       local lines = {}
       if obj.stdout and obj.stdout ~= "" then
-        lines = vim.split(obj.stdout, "\n", { plain = true, trimempty = true })
+        if preserve_empty_lines then
+          lines = vim.split(obj.stdout, "\n", { plain = true })
+          if #lines > 0 and lines[#lines] == "" then
+            table.remove(lines, #lines)
+          end
+        else
+          lines = vim.split(obj.stdout, "\n", { plain = true, trimempty = true })
+        end
       end
       vim.schedule(function()
         callback(obj.code or 1, lines)
@@ -193,7 +202,7 @@ local function run_command_async(argv, callback)
       vim.schedule(function()
         local lines = {}
         for _, line in ipairs(stdout) do
-          if line ~= "" then
+          if preserve_empty_lines or line ~= "" then
             table.insert(lines, line)
           end
         end
@@ -576,7 +585,7 @@ local function read_git_file_lines_async(rev, filepath, done)
       return
     end
     done(lines)
-  end)
+  end, { preserve_empty_lines = true })
 end
 
 ---@param file ZdiffFile
