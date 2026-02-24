@@ -1,4 +1,5 @@
 local M = {}
+local uv = vim.uv or vim.loop
 
 local function run_sync(cmd, cwd)
   local full_cmd = cmd
@@ -57,6 +58,66 @@ local function close_zdiff_or_error()
   close_cb()
 end
 
+local function wait_for_syntax_idle(timeout_ms)
+  local zdiff = require("zdiff")
+  local ok = vim.wait(timeout_ms, function()
+    local dbg = zdiff._debug_state and zdiff._debug_state() or {}
+    return (dbg.pending_syntax_jobs or 0) == 0
+  end, 50)
+  if not ok then
+    error("timeout waiting for zdiff syntax jobs to complete")
+  end
+end
+
+local function benchmark_open_ms(open_fn, wait_timeout_ms)
+  local start = uv.hrtime()
+  open_fn()
+  wait_for_loaded(wait_timeout_ms)
+  wait_for_syntax_idle(wait_timeout_ms)
+  local elapsed_ms = (uv.hrtime() - start) / 1e6
+  close_zdiff_or_error()
+  return elapsed_ms
+end
+
+local function avg(values)
+  local sum = 0
+  for _, v in ipairs(values) do
+    sum = sum + v
+  end
+  if #values == 0 then
+    return 0
+  end
+  return sum / #values
+end
+
+local function p95(values)
+  if #values == 0 then
+    return 0
+  end
+  table.sort(values)
+  local idx = math.max(1, math.ceil(#values * 0.95))
+  return values[idx]
+end
+
+local function build_load_repo(repo)
+  local scenarios = {
+    { ext = "lua", name = "lua", template = "local function fn_%d(x)\n  if x > 0 then\n    return x + %d\n  end\n  return 0\nend\n" },
+    { ext = "py", name = "python", template = "def fn_%d(x):\n    if x > 0:\n        return x + %d\n    return 0\n" },
+    { ext = "js", name = "javascript", template = "function fn_%d(x) {\n  if (x > 0) {\n    return x + %d;\n  }\n  return 0;\n}\n" },
+    { ext = "go", name = "go", template = "func fn%d(x int) int {\n\tif x > 0 {\n\t\treturn x + %d\n\t}\n\treturn 0\n}\n" },
+  }
+
+  for _, scenario in ipairs(scenarios) do
+    local dir = string.format("%s/bench/%s", repo, scenario.name)
+    vim.fn.mkdir(dir, "p")
+    local lines = {}
+    for i = 1, 1500 do
+      lines[#lines + 1] = string.format(scenario.template, i, i)
+    end
+    write_file(string.format("%s/huge.%s", dir, scenario.ext), lines)
+  end
+end
+
 function M.run()
   local zdiff = require("zdiff")
   local plugin_root = vim.fn.getcwd()
@@ -97,9 +158,34 @@ function M.run()
   end
   write_file(string.format("%s/new_untracked.txt", repo), { "untracked", "content" })
 
-  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  -- Build language-varied load benchmark files.
+  build_load_repo(repo)
+  run_sync("git add . && git commit -m 'add load benchmark files'", repo)
+  -- Modify benchmark files to create large hunks.
+  local bench_files = {
+    string.format("%s/bench/lua/huge.lua", repo),
+    string.format("%s/bench/python/huge.py", repo),
+    string.format("%s/bench/javascript/huge.js", repo),
+    string.format("%s/bench/go/huge.go", repo),
+  }
+  for _, path in ipairs(bench_files) do
+    local f = assert(io.open(path, "a"))
+    for i = 1, 400 do
+      f:write(string.format("bench_added_%d = %d\n", i, i))
+    end
+    f:close()
+  end
 
-  local iterations = 80
+  vim.cmd("cd " .. vim.fn.fnameescape(repo))
+  zdiff.setup({
+    default_expanded = false,
+    syntax = {
+      mode = "projection",
+      max_lines = 6000,
+    },
+  })
+
+  local iterations = 40
   local warmup_iterations = 10
   local baseline_kb = 0
   local final_kb = 0
@@ -112,6 +198,7 @@ function M.run()
     end
 
     wait_for_loaded(10000)
+    wait_for_syntax_idle(10000)
 
     local buf = vim.api.nvim_get_current_buf()
     local refresh_cb = find_keymap_callback(buf, "R")
@@ -146,7 +233,37 @@ function M.run()
     )
   end
 
+  -- Load/open timing benchmark on representative language scenarios.
+  zdiff.setup({ default_expanded = true })
+
+  local rounds = 3
+  local timings_uncommitted = {}
+  local timings_ref = {}
+  for _ = 1, rounds do
+    table.insert(timings_uncommitted, benchmark_open_ms(function()
+      zdiff.open()
+    end, 20000))
+    table.insert(timings_ref, benchmark_open_ms(function()
+      zdiff.open("HEAD~1")
+    end, 20000))
+    collectgarbage("collect")
+  end
+
+  local avg_uncommitted = avg(timings_uncommitted)
+  local p95_uncommitted = p95(timings_uncommitted)
+  local avg_ref = avg(timings_ref)
+  local p95_ref = p95(timings_ref)
+
   print(string.format("stress test passed: memory growth %.1f KiB", growth_kb))
+  print(
+    string.format(
+      "open benchmark (ms): uncommitted avg=%.1f p95=%.1f | ref avg=%.1f p95=%.1f",
+      avg_uncommitted,
+      p95_uncommitted,
+      avg_ref,
+      p95_ref
+    )
+  )
 end
 
 return M
