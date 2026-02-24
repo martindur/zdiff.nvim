@@ -6,7 +6,9 @@ Inspired by [Zed's](https://zed.dev) multi-buffer diff view - a clean, collapsib
 
 <img width="50%" height="50%" alt="image" src="https://github.com/user-attachments/assets/cb03976a-3d0c-4554-8d05-f712e030c52c" /><img width="50%" height="50%" alt="image" src="https://github.com/user-attachments/assets/f38c871a-3ca6-490a-8727-26f8275a0bf1" />
 
+Easily yank changes without including git markers or hunk headers
 
+<img width="50%" height="50%" alt="image" src="https://github.com/user-attachments/assets/7b274b5d-db18-4e02-b277-03b633bf9d04" />
 
 ## Features
 
