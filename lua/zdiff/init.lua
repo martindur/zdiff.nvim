@@ -1025,6 +1025,8 @@ goto_source = function()
     restore_window_opts(state.win)
   end
   vim.cmd("edit " .. vim.fn.fnameescape(filepath))
+  local line_count = vim.api.nvim_buf_line_count(0)
+  target_line = math.min(target_line, math.max(1, line_count))
   vim.api.nvim_win_set_cursor(0, { target_line, 0 })
   vim.cmd("normal! zz") -- Center the line
 end
