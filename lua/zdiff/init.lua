@@ -78,7 +78,7 @@ M.config = {
     refresh = "R",
     toggle_mode = "m",
     help = "?",
-    yank_ref = "y",
+    yank_ref = "gy",
   },
   icons = {
     collapsed = "",
