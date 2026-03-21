@@ -112,8 +112,10 @@ Tab completion is available for branch and tag names.
 | `m` | Toggle between uncommitted and branch mode |
 | `R` | Refresh diff |
 | `q` | Close zdiff |
-| `y` | Yank file:line reference (e.g., `path/to/file:10-15`) |
+| `y` | Yank file:line reference |
 | `?` | Show help |
+
+`y` works in both normal mode (current line) and visual mode (selection). Outputs file:line or file:start-end for ranges. Deletion lines are ignored; selections spanning multiple hunks produce multiple ranges (e.g., `path:10-15, 1020-1025`).
 
 Press `?` while in zdiff to see all available keymaps.
 
