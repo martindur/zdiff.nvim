@@ -112,10 +112,10 @@ Tab completion is available for branch and tag names.
 | `m` | Toggle between uncommitted and branch mode |
 | `R` | Refresh diff |
 | `q` | Close zdiff |
-| `y` | Yank file:line reference |
+| `gy` | Yank file:line reference |
 | `?` | Show help |
 
-`y` works in both normal mode (current line) and visual mode (selection). Outputs file:line or file:start-end for ranges. Deletion lines are ignored; selections spanning multiple hunks produce multiple ranges (e.g., `path:10-15, 1020-1025`).
+`gy` works in both normal mode (current line) and visual mode (selection). Outputs file:line or file:start-end for ranges. Deletion lines are ignored; selections spanning multiple hunks produce multiple ranges (e.g., `path:10-15, 1020-1025`).
 
 Press `?` while in zdiff to see all available keymaps.
 
@@ -137,7 +137,7 @@ require("zdiff").setup({
     refresh = "R",
     toggle_mode = "m",
     help = "?",
-    yank_ref = "y",
+    yank_ref = "gy",
   },
 
   -- Icons for UI elements
@@ -180,7 +180,7 @@ require("zdiff").setup({
   keymaps = {
     goto_file = "o",
     toggle = "<Space>",
-    yank_ref = "gY",  -- or false to disable
+    yank_ref = "Y",  -- or false to disable
   },
 })
 ```
