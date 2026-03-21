@@ -1080,8 +1080,19 @@ end
 ---@param end_line number
 local function yank_ref(start_line, end_line)
   local file_idx = nil
-  local lnum_start = nil
-  local lnum_end = nil
+  local ranges = {}
+  local current_range = nil
+
+  local function add_to_range(lnum)
+    if not current_range then
+      current_range = { start = lnum, finish = lnum }
+    elseif lnum == current_range.finish + 1 then
+      current_range.finish = lnum
+    else
+      table.insert(ranges, current_range)
+      current_range = { start = lnum, finish = lnum }
+    end
+  end
 
   for line = start_line, end_line do
     local mapping = state.line_map[line]
@@ -1097,18 +1108,22 @@ local function yank_ref(start_line, end_line)
       return
     end
 
-    local lnum = mapping.lnum
-    if not lnum then
-      lnum = 1
+    if mapping.line_idx and mapping.hunk_idx then
+      local file = state.files[mapping.file_idx]
+      if file and file.hunks[mapping.hunk_idx] then
+        local diff_line = file.hunks[mapping.hunk_idx].lines[mapping.line_idx]
+        if diff_line.type ~= "del" then
+          local lnum = mapping.lnum
+          if lnum then
+            add_to_range(lnum)
+          end
+        end
+      end
     end
+  end
 
-    if not lnum_start then
-      lnum_start = lnum
-      lnum_end = lnum
-    else
-      lnum_start = math.min(lnum_start, lnum)
-      lnum_end = math.max(lnum_end, lnum)
-    end
+  if current_range then
+    table.insert(ranges, current_range)
   end
 
   local file = state.files[file_idx]
@@ -1116,13 +1131,21 @@ local function yank_ref(start_line, end_line)
     return
   end
 
-  local ref
-  if lnum_start == lnum_end then
-    ref = file.path .. ":" .. lnum_start
-  else
-    ref = file.path .. ":" .. lnum_start .. "-" .. lnum_end
+  if #ranges == 0 then
+    notify("Cannot yank: no addition or context lines in selection", vim.log.levels.WARN)
+    return
   end
 
+  local parts = {}
+  for _, r in ipairs(ranges) do
+    if r.start == r.finish then
+      table.insert(parts, tostring(r.start))
+    else
+      table.insert(parts, tostring(r.start) .. "-" .. tostring(r.finish))
+    end
+  end
+
+  local ref = file.path .. ":" .. table.concat(parts, ", ")
   vim.fn.setreg('"', ref)
   vim.fn.setreg("+", ref)
   notify("Yanked: " .. ref)
