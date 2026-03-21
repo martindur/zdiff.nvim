@@ -112,6 +112,7 @@ Tab completion is available for branch and tag names.
 | `m` | Toggle between uncommitted and branch mode |
 | `R` | Refresh diff |
 | `q` | Close zdiff |
+| `y` | Yank file:line reference (e.g., `path/to/file:10-15`) |
 | `?` | Show help |
 
 Press `?` while in zdiff to see all available keymaps.
@@ -126,7 +127,7 @@ require("zdiff").setup({
   -- Default branch for toggle_mode (m key)
   default_branch = "main",
 
-  -- Keymap bindings
+  -- Keymap bindings (defaults)
   keymaps = {
     goto_file = "<CR>",
     toggle = "<Tab>",
@@ -134,6 +135,7 @@ require("zdiff").setup({
     refresh = "R",
     toggle_mode = "m",
     help = "?",
+    yank_ref = "y",
   },
 
   -- Icons for UI elements
@@ -169,20 +171,15 @@ require("zdiff").setup({
 
 #### Custom keymaps
 
+All keymaps can be customized or disabled (set to `false`).
+
 ```lua
 require("zdiff").setup({
   keymaps = {
     goto_file = "o",
     toggle = "<Space>",
+    yank_ref = "gY",  -- or false to disable
   },
-})
-```
-
-#### Expand all files by default
-
-```lua
-require("zdiff").setup({
-  default_expanded = true,
 })
 ```
 
