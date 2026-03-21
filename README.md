@@ -16,6 +16,7 @@ Easily yank changes without including git markers or hunk headers
 - Expand/collapse files to see inline diffs
 - Treesitter syntax highlighting in diff views
 - Jump directly to source files at the correct line
+- Add in-memory annotations for review feedback
 - Auto-refresh when returning to zdiff buffer
 - Tab completion for branch/tag names
 - Configurable keymaps and icons
@@ -113,9 +114,14 @@ Tab completion is available for branch and tag names.
 | `R` | Refresh diff |
 | `q` | Close zdiff |
 | `gy` | Yank file:line reference |
+| `c` | Add annotation on current line / visual selection |
+| `d` | Delete annotation under cursor |
+| `gc` | Yank annotations for the current diff target |
 | `?` | Show help |
 
-`gy` works in both normal mode (current line) and visual mode (selection). Outputs file:line or file:start-end for ranges. Deletion lines are ignored; selections spanning multiple hunks produce multiple ranges (e.g., `path:10-15, 1020-1025`).
+`gy` works in both normal mode (current line) and visual mode (selection). It outputs semantic refs such as `path old:10-12 new:10-13`, so deleted-only selections are supported.
+
+Annotations are kept in memory for the current Neovim session and scoped by diff target. They reappear when reopening the same zdiff target later in the session, but they are not written to disk.
 
 Press `?` while in zdiff to see all available keymaps.
 
@@ -138,6 +144,9 @@ require("zdiff").setup({
     toggle_mode = "m",
     help = "?",
     yank_ref = "gy",
+    comment = "c",
+    delete_comment = "d",
+    yank_comments = "gc",
   },
 
   -- Icons for UI elements

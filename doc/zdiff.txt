@@ -80,6 +80,15 @@ These keymaps are available in the zdiff buffer:
 
     q           Close zdiff and delete the buffer.
 
+    c           Add an annotation on the current diff line or visual
+                selection.
+
+    d           Delete the annotation whose visible range contains the
+                cursor.
+
+    gc          Yank annotations for the current diff target. Output
+                includes file path plus old/new line references.
+
     ?           Show help popup with all available keymaps.
 
 All keymaps are configurable via |zdiff-configuration|.
@@ -104,6 +113,10 @@ Call the setup function with an optional configuration table: >lua
         refresh = "R",
         toggle_mode = "m",
         help = "?",
+        yank_ref = "gy",
+        comment = "c",
+        delete_comment = "d",
+        yank_comments = "gc",
       },
 
       -- Icons for UI elements
@@ -138,6 +151,8 @@ keymaps ~
     Type: `table`
 
     Table of keymap bindings. Set a key to `false` to disable it.
+    Annotation keymaps are session-scoped and in-memory only; they are
+    not persisted to disk.
 
                                                           *zdiff-config-icons*
 icons ~

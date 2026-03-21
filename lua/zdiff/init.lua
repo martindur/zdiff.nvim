@@ -22,12 +22,36 @@ local M = {}
 ---@field new_lnum number|nil line number in new file (for context/add lines)
 ---@field old_lnum number|nil line number in old file (for context/del lines)
 
+---@class ZdiffLineMapEntry
+---@field file_idx number
+---@field hunk_idx number|nil
+---@field line_idx number|nil
+---@field lnum number|nil
+---@field line_type "context"|"add"|"del"|"header"|nil
+---@field old_lnum number|nil
+---@field new_lnum number|nil
+
+---@class ZdiffAnnotationAnchorLine
+---@field type "context"|"add"|"del"
+---@field old_lnum number|nil
+---@field new_lnum number|nil
+
+---@class ZdiffAnnotation
+---@field id integer
+---@field session_key string
+---@field file_path string
+---@field anchor_lines ZdiffAnnotationAnchorLine[]
+---@field old_ranges {start: number, finish: number}[]
+---@field new_ranges {start: number, finish: number}[]
+---@field text string
+---@field created_at integer
+
 ---@class ZdiffState
 ---@field files ZdiffFile[]
 ---@field buf number|nil buffer handle
 ---@field win number|nil window handle
 ---@field base_ref string|nil the git ref to diff against (nil = uncommitted changes vs HEAD)
----@field line_map table<number, {file_idx: number, hunk_idx: number|nil, line_idx: number|nil, lnum: number|nil}>
+---@field line_map table<number, ZdiffLineMapEntry>
 ---@field loading_files boolean whether file list refresh is in progress
 ---@field refresh_seq number monotonically increasing refresh generation
 ---@field refresh_timer uv.uv_timer_t|nil timer used for debounced refresh
@@ -35,6 +59,9 @@ local M = {}
 ---@field syntax_projection_cache table<string, {old: table<number, table[]>, new: table<number, table[]>}|false>
 ---@field syntax_jobs table<string, integer>
 ---@field syntax_job_seq integer
+---@field annotations table<string, ZdiffAnnotation[]>
+---@field next_annotation_id integer
+---@field rendered_annotations table<integer, {id: integer, start_line: integer, end_line: integer}>
 
 ---@type ZdiffState
 local state = {
@@ -50,6 +77,9 @@ local state = {
   syntax_projection_cache = {},
   syntax_jobs = {},
   syntax_job_seq = 0,
+  annotations = {},
+  next_annotation_id = 0,
+  rendered_annotations = {},
 }
 
 -- Forward declarations
@@ -58,6 +88,9 @@ local toggle_expand
 local toggle_mode
 local show_help
 local render
+local add_comment
+local delete_comment
+local yank_comments
 
 -- Configuration
 ---@class ZdiffConfig
@@ -79,6 +112,9 @@ M.config = {
     toggle_mode = "m",
     help = "?",
     yank_ref = "gy",
+    comment = "c",
+    delete_comment = "d",
+    yank_comments = "gc",
   },
   icons = {
     collapsed = "",
@@ -121,6 +157,242 @@ local function normalize_non_negative_number(value)
     return 0
   end
   return math.floor(value)
+end
+
+---@return string
+local function current_session_key()
+  return state.base_ref and ("ref:" .. state.base_ref) or "worktree"
+end
+
+---@param lnums number[]
+---@return {start: number, finish: number}[]
+local function compress_ranges(lnums)
+  table.sort(lnums)
+  local ranges = {}
+  local current = nil
+
+  for _, lnum in ipairs(lnums) do
+    if not current then
+      current = { start = lnum, finish = lnum }
+    elseif lnum == current.finish + 1 then
+      current.finish = lnum
+    elseif lnum ~= current.finish then
+      table.insert(ranges, current)
+      current = { start = lnum, finish = lnum }
+    end
+  end
+
+  if current then
+    table.insert(ranges, current)
+  end
+
+  return ranges
+end
+
+---@param ranges {start: number, finish: number}[]
+---@return string|nil
+local function format_ranges(ranges)
+  if #ranges == 0 then
+    return nil
+  end
+
+  local parts = {}
+  for _, range in ipairs(ranges) do
+    if range.start == range.finish then
+      table.insert(parts, tostring(range.start))
+    else
+      table.insert(parts, string.format("%d-%d", range.start, range.finish))
+    end
+  end
+
+  return table.concat(parts, ", ")
+end
+
+---@param entry ZdiffLineMapEntry|nil
+---@return boolean
+local function is_diff_line_entry(entry)
+  return entry ~= nil and entry.hunk_idx ~= nil and entry.line_idx ~= nil and entry.line_type ~= nil
+end
+
+---@param line number
+---@return boolean
+local function is_diff_line(line)
+  return is_diff_line_entry(state.line_map[line])
+end
+
+---@param line number
+---@return ZdiffFile|nil, ZdiffLineMapEntry|nil
+local function get_file_and_mapping(line)
+  local mapping = state.line_map[line]
+  if not mapping or not mapping.file_idx then
+    return nil, nil
+  end
+  return state.files[mapping.file_idx], mapping
+end
+
+---@param start_line number
+---@param end_line number
+---@return {file_path: string, anchor_lines: ZdiffAnnotationAnchorLine[], old_ranges: {start: number, finish: number}[], new_ranges: {start: number, finish: number}[]}|nil, string|nil
+local function collect_annotation_selection(start_line, end_line)
+  if start_line > end_line then
+    start_line, end_line = end_line, start_line
+  end
+
+  local file = nil
+  local anchor_lines = {}
+  local old_lnums = {}
+  local new_lnums = {}
+
+  for line = start_line, end_line do
+    local current_file, mapping = get_file_and_mapping(line)
+    if not current_file or not is_diff_line_entry(mapping) then
+      return nil, "Can only annotate diff lines"
+    end
+
+    if not file then
+      file = current_file
+    elseif file.path ~= current_file.path then
+      return nil, "Cannot annotate across multiple files"
+    end
+
+    table.insert(anchor_lines, {
+      type = mapping.line_type,
+      old_lnum = mapping.old_lnum,
+      new_lnum = mapping.new_lnum,
+    })
+
+    if mapping.old_lnum then
+      table.insert(old_lnums, mapping.old_lnum)
+    end
+    if mapping.new_lnum then
+      table.insert(new_lnums, mapping.new_lnum)
+    end
+  end
+
+  if not file or #anchor_lines == 0 then
+    return nil, "No diff lines selected"
+  end
+
+  return {
+    file_path = file.path,
+    anchor_lines = anchor_lines,
+    old_ranges = compress_ranges(old_lnums),
+    new_ranges = compress_ranges(new_lnums),
+  }, nil
+end
+
+---@param selection {file_path: string, anchor_lines: ZdiffAnnotationAnchorLine[], old_ranges: {start: number, finish: number}[], new_ranges: {start: number, finish: number}[]}
+---@return string
+local function format_annotation_prompt(selection)
+  local refs = {}
+  local old_ref = format_ranges(selection.old_ranges)
+  local new_ref = format_ranges(selection.new_ranges)
+
+  if old_ref then
+    table.insert(refs, "old:" .. old_ref)
+  end
+  if new_ref then
+    table.insert(refs, "new:" .. new_ref)
+  end
+
+  if #refs == 0 then
+    return "Annotation [" .. selection.file_path .. "]: "
+  end
+
+  return string.format("Annotation [%s %s]: ", selection.file_path, table.concat(refs, " "))
+end
+
+---@param annotation ZdiffAnnotation
+---@return {id: integer, start_line: integer, end_line: integer}|nil
+local function resolve_annotation(annotation)
+  local anchor_len = #annotation.anchor_lines
+  if anchor_len == 0 then
+    return nil
+  end
+
+  local line_count = 0
+  if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
+    line_count = vim.api.nvim_buf_line_count(state.buf)
+  end
+
+  for start_line = 1, line_count do
+    local mapping = state.line_map[start_line]
+    if is_diff_line_entry(mapping) then
+      local file = state.files[mapping.file_idx]
+      if file and file.path == annotation.file_path then
+        local matched = true
+        for offset = 1, anchor_len do
+          local expected = annotation.anchor_lines[offset]
+          local actual = state.line_map[start_line + offset - 1]
+          if not is_diff_line_entry(actual) then
+            matched = false
+            break
+          end
+          local actual_file = state.files[actual.file_idx]
+          if not actual_file
+            or actual_file.path ~= annotation.file_path
+            or actual.line_type ~= expected.type
+            or actual.old_lnum ~= expected.old_lnum
+            or actual.new_lnum ~= expected.new_lnum
+          then
+            matched = false
+            break
+          end
+        end
+
+        if matched then
+          return {
+            id = annotation.id,
+            start_line = start_line,
+            end_line = start_line + anchor_len - 1,
+          }
+        end
+      end
+    end
+  end
+
+  return nil
+end
+
+---@return ZdiffAnnotation[]
+local function current_annotations()
+  local session_key = current_session_key()
+  state.annotations[session_key] = state.annotations[session_key] or {}
+  return state.annotations[session_key]
+end
+
+---@return string
+local function format_annotation_block(annotation)
+  local lines = { "[" .. annotation.file_path .. "]" }
+  local old_ref = format_ranges(annotation.old_ranges)
+  local new_ref = format_ranges(annotation.new_ranges)
+
+  if old_ref then
+    table.insert(lines, "old: " .. old_ref)
+  end
+  if new_ref then
+    table.insert(lines, "new: " .. new_ref)
+  end
+  table.insert(lines, "comment: " .. annotation.text)
+
+  return table.concat(lines, "\n")
+end
+
+---@param value string
+local function set_yank_registers(value)
+  vim.fn.setreg('"', value)
+
+  local has_display = vim.env.DISPLAY or vim.env.WAYLAND_DISPLAY
+  local can_use_clipboard = vim.fn.has("clipboard") == 1 and (
+    has_display
+    or vim.fn.has("macunix") == 1
+    or vim.fn.has("win32") == 1
+    or vim.fn.has("win64") == 1
+  )
+
+  if can_use_clipboard then
+    pcall(vim.fn.setreg, "+", value)
+  end
 end
 
 ---@param win number
@@ -168,6 +440,7 @@ local uv = vim.uv or vim.loop
 local ns_diff = vim.api.nvim_create_namespace("zdiff")
 local ns_syntax = vim.api.nvim_create_namespace("zdiff_syntax")
 local ns_markers = vim.api.nvim_create_namespace("zdiff_markers")
+local ns_annotations = vim.api.nvim_create_namespace("zdiff_annotations")
 
 ---@param argv string[]
 ---@param callback fun(code: number, lines: string[])
@@ -855,7 +1128,11 @@ render = function()
           )
           -- Keep git metadata out of buffer text; render as virtual text instead.
           table.insert(lines, "  ")
-          state.line_map[#lines] = { file_idx = file_idx, hunk_idx = hunk_idx }
+          state.line_map[#lines] = {
+            file_idx = file_idx,
+            hunk_idx = hunk_idx,
+            line_type = "header",
+          }
           table.insert(highlights, { #lines, "Comment", 0, -1 })
           table.insert(markers, { #lines, hunk_header, "Comment" })
 
@@ -871,6 +1148,9 @@ render = function()
               hunk_idx = hunk_idx,
               line_idx = line_idx,
               lnum = diff_line.new_lnum or diff_line.old_lnum,
+              line_type = diff_line.type,
+              old_lnum = diff_line.old_lnum,
+              new_lnum = diff_line.new_lnum,
             }
 
             -- Add diff background highlight
@@ -1003,6 +1283,69 @@ render = function()
     })
   end
 
+  vim.api.nvim_buf_clear_namespace(state.buf, ns_annotations, 0, -1)
+  state.rendered_annotations = {}
+  local session_annotations = current_annotations()
+  local resolved = {}
+  local unresolved_ids = {}
+  local expanded_files = {}
+
+  for _, file in ipairs(state.files) do
+    if file.expanded then
+      expanded_files[file.path] = true
+    end
+  end
+
+  for _, annotation in ipairs(session_annotations) do
+    local match = resolve_annotation(annotation)
+    if match then
+      table.insert(resolved, {
+        id = annotation.id,
+        start_line = match.start_line,
+        end_line = match.end_line,
+        text = annotation.text,
+      })
+    elseif not state.loading_files and expanded_files[annotation.file_path] then
+      unresolved_ids[annotation.id] = true
+    end
+  end
+
+  if not state.loading_files and next(unresolved_ids) ~= nil then
+    local kept = {}
+    for _, annotation in ipairs(session_annotations) do
+      if not unresolved_ids[annotation.id] then
+        table.insert(kept, annotation)
+      end
+    end
+    state.annotations[current_session_key()] = kept
+    session_annotations = kept
+  end
+
+  local by_line = {}
+  for _, annotation in ipairs(resolved) do
+    by_line[annotation.end_line] = by_line[annotation.end_line] or {}
+    table.insert(by_line[annotation.end_line], annotation)
+    table.insert(state.rendered_annotations, {
+      id = annotation.id,
+      start_line = annotation.start_line,
+      end_line = annotation.end_line,
+    })
+  end
+
+  local sorted_lines = vim.tbl_keys(by_line)
+  table.sort(sorted_lines)
+  for _, end_line in ipairs(sorted_lines) do
+    local annotations = by_line[end_line]
+    local virt_lines = {}
+    for _, annotation in ipairs(annotations) do
+      table.insert(virt_lines, { { "  └ " .. annotation.text, "Comment" } })
+    end
+    vim.api.nvim_buf_set_extmark(state.buf, ns_annotations, end_line - 1, 0, {
+      virt_lines = virt_lines,
+      virt_lines_above = false,
+    })
+  end
+
   vim.bo[state.buf].modifiable = false
 
   -- Queue syntax projection jobs after first paint for responsive rendering.
@@ -1079,75 +1422,28 @@ end
 ---@param start_line number
 ---@param end_line number
 local function yank_ref(start_line, end_line)
-  local file_idx = nil
-  local ranges = {}
-  local current_range = nil
-
-  local function add_to_range(lnum)
-    if not current_range then
-      current_range = { start = lnum, finish = lnum }
-    elseif lnum == current_range.finish + 1 then
-      current_range.finish = lnum
-    else
-      table.insert(ranges, current_range)
-      current_range = { start = lnum, finish = lnum }
-    end
-  end
-
-  for line = start_line, end_line do
-    local mapping = state.line_map[line]
-    if not mapping or not mapping.file_idx then
-      notify("Cannot yank: line " .. line .. " is not a diff line", vim.log.levels.WARN)
-      return
-    end
-
-    if not file_idx then
-      file_idx = mapping.file_idx
-    elseif file_idx ~= mapping.file_idx then
-      notify("Cannot yank: selection spans multiple files", vim.log.levels.WARN)
-      return
-    end
-
-    if mapping.line_idx and mapping.hunk_idx then
-      local file = state.files[mapping.file_idx]
-      if file and file.hunks[mapping.hunk_idx] then
-        local diff_line = file.hunks[mapping.hunk_idx].lines[mapping.line_idx]
-        if diff_line.type ~= "del" then
-          local lnum = mapping.lnum
-          if lnum then
-            add_to_range(lnum)
-          end
-        end
-      end
-    end
-  end
-
-  if current_range then
-    table.insert(ranges, current_range)
-  end
-
-  local file = state.files[file_idx]
-  if not file then
+  local selection, err = collect_annotation_selection(start_line, end_line)
+  if not selection then
+    notify("Cannot yank: " .. err, vim.log.levels.WARN)
     return
   end
 
-  if #ranges == 0 then
-    notify("Cannot yank: no addition or context lines in selection", vim.log.levels.WARN)
-    return
+  local refs = {}
+  local old_ref = format_ranges(selection.old_ranges)
+  local new_ref = format_ranges(selection.new_ranges)
+  if old_ref then
+    table.insert(refs, "old:" .. old_ref)
+  end
+  if new_ref then
+    table.insert(refs, "new:" .. new_ref)
   end
 
-  local parts = {}
-  for _, r in ipairs(ranges) do
-    if r.start == r.finish then
-      table.insert(parts, tostring(r.start))
-    else
-      table.insert(parts, tostring(r.start) .. "-" .. tostring(r.finish))
-    end
+  local ref = selection.file_path
+  if #refs > 0 then
+    ref = ref .. " " .. table.concat(refs, " ")
   end
 
-  local ref = file.path .. ":" .. table.concat(parts, ", ")
-  vim.fn.setreg('"', ref)
-  vim.fn.setreg("+", ref)
+  set_yank_registers(ref)
   notify("Yanked: " .. ref)
 end
 
@@ -1157,6 +1453,113 @@ _G.yank_ref_visual = function()
   local start_line = start_pos[2]
   local end_line = end_pos[2]
   yank_ref(start_line, end_line)
+end
+
+---@param start_line number
+---@param end_line number
+---@param text string
+---@return boolean
+local function store_annotation(start_line, end_line, text)
+  local selection, err = collect_annotation_selection(start_line, end_line)
+  if not selection then
+    notify(err, vim.log.levels.WARN)
+    return false
+  end
+
+  state.next_annotation_id = state.next_annotation_id + 1
+  table.insert(current_annotations(), {
+    id = state.next_annotation_id,
+    session_key = current_session_key(),
+    file_path = selection.file_path,
+    anchor_lines = selection.anchor_lines,
+    old_ranges = selection.old_ranges,
+    new_ranges = selection.new_ranges,
+    text = text,
+    created_at = state.next_annotation_id,
+  })
+
+  if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
+    render()
+  end
+
+  return true
+end
+
+---@param start_line number
+---@param end_line number
+add_comment = function(start_line, end_line)
+  if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
+    return
+  end
+
+  local selection, err = collect_annotation_selection(start_line, end_line)
+  if not selection then
+    notify(err, vim.log.levels.WARN)
+    return
+  end
+
+  vim.cmd("stopinsert")
+  local text = vim.fn.input({
+    prompt = format_annotation_prompt(selection),
+    cancelreturn = nil,
+  })
+
+  if not text or text == "" then
+    notify("Annotation cancelled", vim.log.levels.INFO)
+    return
+  end
+
+  if store_annotation(start_line, end_line, text) then
+    notify("Annotation added", vim.log.levels.INFO)
+  end
+end
+
+delete_comment = function()
+  if not state.win or not vim.api.nvim_win_is_valid(state.win) then
+    return
+  end
+
+  local cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
+  local session_annotations = current_annotations()
+
+  for idx = #state.rendered_annotations, 1, -1 do
+    local rendered = state.rendered_annotations[idx]
+    if cursor_line >= rendered.start_line and cursor_line <= rendered.end_line then
+      for annotation_idx = #session_annotations, 1, -1 do
+        if session_annotations[annotation_idx].id == rendered.id then
+          table.remove(session_annotations, annotation_idx)
+          render()
+          notify("Annotation deleted", vim.log.levels.INFO)
+          return
+        end
+      end
+    end
+  end
+
+  notify("No annotation on this line", vim.log.levels.WARN)
+end
+
+yank_comments = function()
+  local session_annotations = current_annotations()
+  if #session_annotations == 0 then
+    notify("No annotations to yank", vim.log.levels.WARN)
+    return
+  end
+
+  local blocks = {}
+  for _, annotation in ipairs(session_annotations) do
+    table.insert(blocks, format_annotation_block(annotation))
+  end
+
+  local content = table.concat(blocks, "\n\n")
+  set_yank_registers(content)
+  notify(string.format("Yanked %d annotation%s", #session_annotations, #session_annotations == 1 and "" or "s"))
+end
+
+_G.zdiff_add_comment_visual = function()
+  local start_pos = vim.fn.getpos("'<")
+  local end_pos = vim.fn.getpos("'>")
+  add_comment(start_pos[2], end_pos[2])
 end
 
 ---Show help in a floating window
@@ -1172,6 +1575,15 @@ show_help = function()
 
   if M.config.keymaps.yank_ref then
     table.insert(keymaps, { M.config.keymaps.yank_ref, "Yank file:line reference" })
+  end
+  if M.config.keymaps.comment then
+    table.insert(keymaps, { M.config.keymaps.comment, "Add annotation" })
+  end
+  if M.config.keymaps.delete_comment then
+    table.insert(keymaps, { M.config.keymaps.delete_comment, "Delete annotation" })
+  end
+  if M.config.keymaps.yank_comments then
+    table.insert(keymaps, { M.config.keymaps.yank_comments, "Yank annotations" })
   end
 
   -- Find the longest description to calculate width
@@ -1447,6 +1859,34 @@ function M.open(base_ref)
     )
   end
 
+  if M.config.keymaps.comment then
+    vim.keymap.set("n", M.config.keymaps.comment, function()
+      local cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
+      add_comment(cursor_line, cursor_line)
+    end, { buffer = state.buf, silent = true })
+    vim.api.nvim_buf_set_keymap(
+      state.buf,
+      "v",
+      M.config.keymaps.comment,
+      ":lua zdiff_add_comment_visual()<CR>",
+      { silent = true }
+    )
+  end
+
+  if M.config.keymaps.delete_comment then
+    vim.keymap.set("n", M.config.keymaps.delete_comment, delete_comment, {
+      buffer = state.buf,
+      silent = true,
+    })
+  end
+
+  if M.config.keymaps.yank_comments then
+    vim.keymap.set("n", M.config.keymaps.yank_comments, yank_comments, {
+      buffer = state.buf,
+      silent = true,
+    })
+  end
+
   -- Auto-refresh when returning to zdiff buffer
   vim.api.nvim_create_autocmd("BufEnter", {
     buffer = state.buf,
@@ -1486,11 +1926,40 @@ M.show_help = function()
   show_help()
 end
 
+M._debug_add_annotation = function(start_line, end_line, text)
+  return store_annotation(start_line, end_line, text)
+end
+
+M._debug_reset = function()
+  state.files = {}
+  state.buf = nil
+  state.win = nil
+  state.base_ref = nil
+  state.line_map = {}
+  state.loading_files = false
+  state.refresh_seq = 0
+  if state.refresh_timer then
+    state.refresh_timer:stop()
+    state.refresh_timer:close()
+    state.refresh_timer = nil
+  end
+  state.win_opts = {}
+  state.syntax_projection_cache = {}
+  state.syntax_jobs = {}
+  state.syntax_job_seq = 0
+  state.annotations = {}
+  state.next_annotation_id = 0
+  state.rendered_annotations = {}
+end
+
 M._debug_state = function()
   return {
     loading_files = state.loading_files,
     pending_syntax_jobs = vim.tbl_count(state.syntax_jobs),
     syntax_cache_entries = vim.tbl_count(state.syntax_projection_cache),
+    current_session = current_session_key(),
+    annotation_count = #current_annotations(),
+    rendered_annotation_count = #state.rendered_annotations,
   }
 end
 
