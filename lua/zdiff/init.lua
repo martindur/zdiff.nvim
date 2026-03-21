@@ -274,34 +274,40 @@ local function get_diff_stats_async(base_ref, done)
       end
     end
 
-    run_command_async({ "git", "diff", "--name-status", diff_target }, function(_, status_result)
-      for _, line in ipairs(status_result) do
-        local status, path = line:match("^(%a)%s+(.+)$")
-        if path and stats[path] then
-          stats[path].status = status
-        elseif path then
-          stats[path] = { insertions = 0, deletions = 0, status = status }
-        end
-      end
-
-      if base_ref then
-        done(stats)
-        return
-      end
-
-      run_command_async({ "git", "ls-files", "--others", "--exclude-standard" }, function(_, untracked_result)
-        for _, path in ipairs(untracked_result) do
-          if path ~= "" and not stats[path] then
-            stats[path] = {
-              insertions = count_file_lines(path),
-              deletions = 0,
-              status = "?",
-            }
+    run_command_async(
+      { "git", "diff", "--name-status", diff_target },
+      function(_, status_result)
+        for _, line in ipairs(status_result) do
+          local status, path = line:match("^(%a)%s+(.+)$")
+          if path and stats[path] then
+            stats[path].status = status
+          elseif path then
+            stats[path] = { insertions = 0, deletions = 0, status = status }
           end
         end
-        done(stats)
-      end)
-    end)
+
+        if base_ref then
+          done(stats)
+          return
+        end
+
+        run_command_async(
+          { "git", "ls-files", "--others", "--exclude-standard" },
+          function(_, untracked_result)
+            for _, path in ipairs(untracked_result) do
+              if path ~= "" and not stats[path] then
+                stats[path] = {
+                  insertions = count_file_lines(path),
+                  deletions = 0,
+                  status = "?",
+                }
+              end
+            end
+            done(stats)
+          end
+        )
+      end
+    )
   end)
 end
 
@@ -415,7 +421,11 @@ local function get_file_diff(filepath, base_ref, status)
 
   local cmd
   if base_ref then
-    cmd = string.format("git diff %s...HEAD -- %s", vim.fn.shellescape(base_ref), vim.fn.shellescape(filepath))
+    cmd = string.format(
+      "git diff %s...HEAD -- %s",
+      vim.fn.shellescape(base_ref),
+      vim.fn.shellescape(filepath)
+    )
   else
     cmd = string.format("git diff HEAD -- %s", vim.fn.shellescape(filepath))
   end
@@ -697,7 +707,14 @@ local function get_syntax_cache_key(file)
   for _, hunk in ipairs(file.hunks) do
     table.insert(
       pieces,
-      string.format("%d:%d:%d:%d:%d", hunk.old_start, hunk.old_count, hunk.new_start, hunk.new_count, #hunk.lines)
+      string.format(
+        "%d:%d:%d:%d:%d",
+        hunk.old_start,
+        hunk.old_count,
+        hunk.new_start,
+        hunk.new_count,
+        #hunk.lines
+      )
     )
     for _, line in ipairs(hunk.lines) do
       table.insert(pieces, line.type .. ":" .. line.text)
@@ -756,7 +773,8 @@ render = function()
   local syntax_highlights = {} -- collected after we know line positions
   local syntax_requests = {}
   local syntax_cfg = M.config.syntax or {}
-  local syntax_mode = normalize_enum(syntax_cfg.mode, { projection = true, hunk = true }, "projection")
+  local syntax_mode =
+    normalize_enum(syntax_cfg.mode, { projection = true, hunk = true }, "projection")
   local markers = {} -- {line_idx, text, hl_group}
   state.line_map = {}
 
@@ -790,7 +808,8 @@ render = function()
       local status_icon = get_status_icon(file.status)
       local add_stat = string.format("+%d", file.insertions)
       local del_stat = string.format("-%d", file.deletions)
-      local file_line = string.format("%s %s %s  %s %s", icon, status_icon, file.path, add_stat, del_stat)
+      local file_line =
+        string.format("%s %s %s  %s %s", icon, status_icon, file.path, add_stat, del_stat)
       table.insert(lines, file_line)
 
       -- Map this line to the file
@@ -855,7 +874,10 @@ render = function()
             }
 
             -- Add diff background highlight
-            table.insert(highlights, { #lines, get_line_highlight(diff_line.type), 0, -1 })
+            table.insert(
+              highlights,
+              { #lines, get_line_highlight(diff_line.type), 0, -1 }
+            )
 
             -- Render +/- markers as virtual text so they are not part of buffer content
             if diff_line.type == "add" then
@@ -876,7 +898,10 @@ render = function()
               })
 
               table.insert(code_lines, diff_line.text)
-              table.insert(code_line_mapping, { buffer_line = #lines, prefix_len = #prefix })
+              table.insert(
+                code_line_mapping,
+                { buffer_line = #lines, prefix_len = #prefix }
+              )
             end
           end
         end
@@ -889,12 +914,15 @@ render = function()
             local projection = state.syntax_projection_cache[cache_key]
             if projection then
               for _, line_info in ipairs(projection_lines) do
-                local side_map = line_info.source_side == "old" and projection.old or projection.new
-                local side_lnum = line_info.source_side == "old" and line_info.old_lnum or line_info.new_lnum
+                local side_map = line_info.source_side == "old" and projection.old
+                  or projection.new
+                local side_lnum = line_info.source_side == "old" and line_info.old_lnum
+                  or line_info.new_lnum
                 if side_lnum and side_map[side_lnum] then
                   for _, cap in ipairs(side_map[side_lnum]) do
                     local col_start = line_info.prefix_len + cap.col_start
-                    local col_end = cap.col_end == -1 and -1 or (line_info.prefix_len + cap.col_end)
+                    local col_end = cap.col_end == -1 and -1
+                      or (line_info.prefix_len + cap.col_end)
                     table.insert(syntax_highlights, {
                       line_info.buffer_line,
                       cap.hl_group,
@@ -917,7 +945,8 @@ render = function()
               if mapping then
                 -- Offset columns by prefix length
                 local col_start = mapping.prefix_len + hl.col_start
-                local col_end = hl.col_end == -1 and -1 or (mapping.prefix_len + hl.col_end)
+                local col_end = hl.col_end == -1 and -1
+                  or (mapping.prefix_len + hl.col_end)
                 table.insert(syntax_highlights, {
                   mapping.buffer_line,
                   hl.hl_group,
@@ -939,14 +968,28 @@ render = function()
   vim.api.nvim_buf_clear_namespace(state.buf, ns_diff, 0, -1)
   for _, hl in ipairs(highlights) do
     local line_idx, hl_group, col_start, col_end = hl[1], hl[2], hl[3], hl[4]
-    vim.api.nvim_buf_add_highlight(state.buf, ns_diff, hl_group, line_idx - 1, col_start, col_end)
+    vim.api.nvim_buf_add_highlight(
+      state.buf,
+      ns_diff,
+      hl_group,
+      line_idx - 1,
+      col_start,
+      col_end
+    )
   end
 
   -- Apply syntax highlights on top (foreground colors)
   vim.api.nvim_buf_clear_namespace(state.buf, ns_syntax, 0, -1)
   for _, hl in ipairs(syntax_highlights) do
     local line_idx, hl_group, col_start, col_end = hl[1], hl[2], hl[3], hl[4]
-    vim.api.nvim_buf_add_highlight(state.buf, ns_syntax, hl_group, line_idx - 1, col_start, col_end)
+    vim.api.nvim_buf_add_highlight(
+      state.buf,
+      ns_syntax,
+      hl_group,
+      line_idx - 1,
+      col_start,
+      col_end
+    )
   end
 
   -- Apply virtual +/- markers in the left padding columns
@@ -1081,8 +1124,16 @@ local function yank_ref(start_line, end_line)
   end
 
   vim.fn.setreg('"', ref)
-  vim.fn.setreg('+', ref)
+  vim.fn.setreg("+", ref)
   notify("Yanked: " .. ref)
+end
+
+_G.yank_ref_visual = function()
+  local start_pos = vim.fn.getpos("'<")
+  local end_pos = vim.fn.getpos("'>")
+  local start_line = start_pos[2]
+  local end_line = end_pos[2]
+  yank_ref(start_line, end_line)
 end
 
 ---Show help in a floating window
@@ -1307,7 +1358,9 @@ function M.open(base_ref)
 
   -- Validate the ref if provided
   if base_ref and base_ref ~= "" then
-    vim.fn.system("git rev-parse --verify " .. vim.fn.shellescape(base_ref) .. " 2>/dev/null")
+    vim.fn.system(
+      "git rev-parse --verify " .. vim.fn.shellescape(base_ref) .. " 2>/dev/null"
+    )
     if vim.v.shell_error ~= 0 then
       notify("Invalid git ref: " .. base_ref, vim.log.levels.ERROR)
       return
@@ -1360,12 +1413,15 @@ function M.open(base_ref)
     vim.keymap.set("n", M.config.keymaps.yank_ref, function()
       local cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
       yank_ref(cursor_line, cursor_line)
-    end, opts)
-    vim.keymap.set("v", M.config.keymaps.yank_ref, function()
-      local start_line = vim.api.nvim_buf_get_mark(state.buf, "<")[1]
-      local end_line = vim.api.nvim_buf_get_mark(state.buf, ">")[1]
-      yank_ref(start_line, end_line)
-    end, opts)
+    end, { buffer = state.buf, silent = true })
+    local yank_ref_key = M.config.keymaps.yank_ref
+    vim.api.nvim_buf_set_keymap(
+      state.buf,
+      "v",
+      yank_ref_key,
+      ":lua yank_ref_visual()<CR>",
+      { silent = true }
+    )
   end
 
   -- Auto-refresh when returning to zdiff buffer
