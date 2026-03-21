@@ -78,6 +78,7 @@ M.config = {
     refresh = "R",
     toggle_mode = "m",
     help = "?",
+    yank_ref = "y",
   },
   icons = {
     collapsed = "",
@@ -1031,6 +1032,59 @@ goto_source = function()
   vim.cmd("normal! zz") -- Center the line
 end
 
+---Yank a file:line reference for the current line or visual selection
+---@param start_line number
+---@param end_line number
+local function yank_ref(start_line, end_line)
+  local file_idx = nil
+  local lnum_start = nil
+  local lnum_end = nil
+
+  for line = start_line, end_line do
+    local mapping = state.line_map[line]
+    if not mapping or not mapping.file_idx then
+      notify("Cannot yank: line " .. line .. " is not a diff line", vim.log.levels.WARN)
+      return
+    end
+
+    if not file_idx then
+      file_idx = mapping.file_idx
+    elseif file_idx ~= mapping.file_idx then
+      notify("Cannot yank: selection spans multiple files", vim.log.levels.WARN)
+      return
+    end
+
+    local lnum = mapping.lnum
+    if not lnum then
+      lnum = 1
+    end
+
+    if not lnum_start then
+      lnum_start = lnum
+      lnum_end = lnum
+    else
+      lnum_start = math.min(lnum_start, lnum)
+      lnum_end = math.max(lnum_end, lnum)
+    end
+  end
+
+  local file = state.files[file_idx]
+  if not file then
+    return
+  end
+
+  local ref
+  if lnum_start == lnum_end then
+    ref = file.path .. ":" .. lnum_start
+  else
+    ref = file.path .. ":" .. lnum_start .. "-" .. lnum_end
+  end
+
+  vim.fn.setreg('"', ref)
+  vim.fn.setreg('+', ref)
+  notify("Yanked: " .. ref)
+end
+
 ---Show help in a floating window
 show_help = function()
   local keymaps = {
@@ -1041,6 +1095,10 @@ show_help = function()
     { M.config.keymaps.close, "Close zdiff" },
     { M.config.keymaps.help, "Show this help" },
   }
+
+  if M.config.keymaps.yank_ref then
+    table.insert(keymaps, { M.config.keymaps.yank_ref, "Yank file:line reference" })
+  end
 
   -- Find the longest description to calculate width
   local max_desc_len = 0
@@ -1297,6 +1355,18 @@ function M.open(base_ref)
   vim.keymap.set("n", M.config.keymaps.refresh, refresh, opts)
   vim.keymap.set("n", M.config.keymaps.toggle_mode, toggle_mode, opts)
   vim.keymap.set("n", M.config.keymaps.help, show_help, opts)
+
+  if M.config.keymaps.yank_ref then
+    vim.keymap.set("n", M.config.keymaps.yank_ref, function()
+      local cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
+      yank_ref(cursor_line, cursor_line)
+    end, opts)
+    vim.keymap.set("v", M.config.keymaps.yank_ref, function()
+      local start_line = vim.api.nvim_buf_get_mark(state.buf, "<")[1]
+      local end_line = vim.api.nvim_buf_get_mark(state.buf, ">")[1]
+      yank_ref(start_line, end_line)
+    end, opts)
+  end
 
   -- Auto-refresh when returning to zdiff buffer
   vim.api.nvim_create_autocmd("BufEnter", {
