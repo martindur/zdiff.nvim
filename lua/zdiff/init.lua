@@ -1,6 +1,5 @@
 local M = {}
 local annotation_format = require("zdiff.annotations")
-local annotation_focus = require("zdiff.annotation_focus")
 local git = require("zdiff.git")
 local selections = require("zdiff.selections")
 
@@ -898,7 +897,7 @@ render = function()
   local markers = {} -- {line_idx, text, hl_group}
   state.line_map = {}
   local annotation_visibility = state.annotations_only
-      and annotation_focus.collect_visibility(state.files, current_annotations(), function(file)
+      and annotation_format.collect_visibility(state.files, current_annotations(), function(file)
         if #file.hunks == 0 then
           file.hunks = get_file_diff(file.path, state.base_ref, file.status)
         end
@@ -1463,7 +1462,7 @@ toggle_annotations_only = function()
   state.annotations_only = not state.annotations_only
 
   if state.annotations_only then
-    local visibility = annotation_focus.collect_visibility(
+    local visibility = annotation_format.collect_visibility(
       state.files,
       current_annotations(),
       function(file)
