@@ -25,7 +25,7 @@ function M.format_export_ref(annotation)
 
   local old_ref = selections.format_ranges(annotation.old_ranges)
   if old_ref then
-    return string.format("%s:deleted %s", annotation.file_path, old_ref)
+    return string.format("%s:%s(deleted)", annotation.file_path, old_ref)
   end
 
   return annotation.file_path

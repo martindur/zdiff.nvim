@@ -172,7 +172,7 @@ describe("zdiff", function()
         yank_ref = "gy",
         comment = "c",
         delete_comment = "d",
-        yank_comments = "gc",
+        yank_comments = "yc",
       },
       icons = {
         collapsed = "",
@@ -184,6 +184,10 @@ describe("zdiff", function()
       syntax = {
         mode = "projection",
         max_lines = 8000,
+      },
+      comments = {
+        prefix = "Feedback for changes:\n",
+        suffix = "",
       },
     }
   end)
@@ -212,6 +216,7 @@ describe("zdiff", function()
       assert.equals("<CR>", zdiff.config.keymaps.goto_file)
       assert.equals("projection", zdiff.config.syntax.mode)
       assert.equals(8000, zdiff.config.syntax.max_lines)
+      assert.equals("Feedback for changes:\n", zdiff.config.comments.prefix)
     end)
 
     it("should merge user config with defaults", function()
@@ -224,6 +229,7 @@ describe("zdiff", function()
       -- Should preserve other defaults
       assert.equals("<CR>", zdiff.config.keymaps.goto_file)
       assert.equals("c", zdiff.config.keymaps.comment)
+      assert.equals("Feedback for changes:\n", zdiff.config.comments.prefix)
     end)
 
     it("should allow overriding individual keymaps", function()
@@ -236,7 +242,7 @@ describe("zdiff", function()
       -- Should preserve other keymaps
       assert.equals("<Tab>", zdiff.config.keymaps.toggle)
       assert.equals("q", zdiff.config.keymaps.close)
-      assert.equals("gc", zdiff.config.keymaps.yank_comments)
+      assert.equals("yc", zdiff.config.keymaps.yank_comments)
     end)
 
     it("should allow overriding icons", function()
@@ -261,6 +267,17 @@ describe("zdiff", function()
       })
       assert.equals("hunk", zdiff.config.syntax.mode)
       assert.equals(1000, zdiff.config.syntax.max_lines)
+    end)
+
+    it("should allow overriding annotation yank formatting", function()
+      zdiff.setup({
+        comments = {
+          prefix = "Review notes:\n",
+          suffix = "\n-- end --",
+        },
+      })
+      assert.equals("Review notes:\n", zdiff.config.comments.prefix)
+      assert.equals("\n-- end --", zdiff.config.comments.suffix)
     end)
   end)
 
@@ -372,11 +389,12 @@ describe("zdiff", function()
       assert.equals("yes:1", vim.wo[0].signcolumn)
       assert.equals("Needs follow-up", zdiff._debug_rendered_annotations()[1].label)
 
-      local yank_cb = find_keymap_callback(buf, "gc")
+      local yank_cb = find_keymap_callback(buf, "yc")
       assert.is_not_nil(yank_cb, "Yank annotations keymap should be defined")
       yank_cb()
 
       local content = vim.fn.getreg('"')
+      assert.is_truthy(content:find("^Feedback for changes:\n"))
       assert.is_truthy(content:find("example.txt:2%-4 Needs follow%-up"))
 
       local line = find_buffer_line(buf, "  beta changed")
@@ -400,11 +418,36 @@ describe("zdiff", function()
       local line = find_buffer_line(buf, "  one")
       assert.is_true(zdiff._debug_add_annotation(line, line, "Remove this"))
 
-      local yank_cb = find_keymap_callback(buf, "gc")
+      local yank_cb = find_keymap_callback(buf, "yc")
       yank_cb()
 
       local content = vim.fn.getreg('"')
-      assert.is_truthy(content:find("gone.txt:deleted 1 Remove this"))
+      assert.is_truthy(content:find("gone.txt:1%(deleted%) Remove this"))
+    end)
+
+    it("should respect configured annotation prefix and suffix", function()
+      local repo = create_modified_repo()
+      vim.cmd("cd " .. vim.fn.fnameescape(repo))
+
+      zdiff.setup({
+        default_expanded = true,
+        comments = {
+          prefix = "Review notes:\n",
+          suffix = "\n-- end --",
+        },
+      })
+      zdiff.open()
+      wait_for_loaded(5000)
+
+      local buf = vim.api.nvim_get_current_buf()
+      local line = find_buffer_line(buf, "  beta")
+      assert.is_true(zdiff._debug_add_annotation(line, line, "Keep this"))
+
+      local yank_cb = find_keymap_callback(buf, "yc")
+      yank_cb()
+
+      local content = vim.fn.getreg('"')
+      assert.equals("Review notes:\nexample.txt:2(deleted) Keep this\n-- end --", content)
     end)
 
     it("should persist annotations for the same diff target across reopen", function()

@@ -116,12 +116,14 @@ Tab completion is available for branch and tag names.
 | `gy` | Yank file:line reference |
 | `c` | Add annotation on current line / visual selection |
 | `d` | Delete annotation under cursor |
-| `gc` | Yank annotations for the current diff target |
+| `yc` | Yank annotations for the current diff target |
 | `?` | Show help |
 
 `gy` works in both normal mode (current line) and visual mode (selection). It outputs `file:line` / `file:start-end`, ignores deleted lines, and preserves multiple ranges across hunks such as `path:10-15, 1020-1025`.
 
-Annotations are kept in memory for the current Neovim session and scoped by diff target. They reappear when reopening the same zdiff target later in the session, but they are not written to disk. `gc` exports concise lines like `path/to/file.lua:12-14 tighten this branch`, and uses `path/to/file.lua:deleted 12-13 ...` for deletion-only annotations.
+Annotations are kept in memory for the current Neovim session and scoped by diff target. They reappear when reopening the same zdiff target later in the session, but they are not written to disk. `yc` exports concise lines like `path/to/file.lua:12-14 tighten this branch`, and uses `path/to/file.lua:12-13(deleted) ...` for deletion-only annotations.
+
+You can wrap `yc` output with a configurable prefix/suffix, which is useful when pasting feedback straight into an AI prompt.
 
 Press `?` while in zdiff to see all available keymaps.
 
@@ -146,7 +148,7 @@ require("zdiff").setup({
     yank_ref = "gy",
     comment = "c",
     delete_comment = "d",
-    yank_comments = "gc",
+    yank_comments = "yc",
   },
 
   -- Icons for UI elements
@@ -166,6 +168,11 @@ require("zdiff").setup({
     -- Skip projection when either old/new source exceeds this many lines.
     -- 0 means unlimited.
     max_lines = 8000,
+  },
+
+  comments = {
+    prefix = "Feedback for changes:\n",
+    suffix = "",
   },
 })
 ```

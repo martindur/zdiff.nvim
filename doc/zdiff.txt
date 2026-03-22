@@ -86,9 +86,9 @@ These keymaps are available in the zdiff buffer:
     d           Delete the annotation whose visible range contains the
                 cursor.
 
-    gc          Yank annotations for the current diff target. Output
+    yc          Yank annotations for the current diff target. Output
                 uses concise refs such as `path:12-14 text`, and
-                `path:deleted 12-13 text` for deletion-only ranges.
+                `path:12-13(deleted) text` for deletion-only ranges.
 
     ?           Show help popup with all available keymaps.
 
@@ -117,7 +117,7 @@ Call the setup function with an optional configuration table: >lua
         yank_ref = "gy",
         comment = "c",
         delete_comment = "d",
-        yank_comments = "gc",
+        yank_comments = "yc",
       },
 
       -- Icons for UI elements
@@ -127,6 +127,11 @@ Call the setup function with an optional configuration table: >lua
         added = "+",
         deleted = "-",
         modified = "~",
+      },
+
+      comments = {
+        prefix = "Feedback for changes:\n",
+        suffix = "",
       },
     })
 <
@@ -160,6 +165,12 @@ icons ~
     Type: `table`
 
     Icons used in the UI for collapsed/expanded states and file status.
+
+                                                       *zdiff-config-comments*
+comments ~
+    Type: `table`
+
+    Controls prefix/suffix text wrapped around `yc` annotation output.
 
 ==============================================================================
 6. FUNCTIONS                                                 *zdiff-functions*

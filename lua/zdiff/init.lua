@@ -101,6 +101,9 @@ local yank_comments
 ---@field keymaps table<string, string> Keymap bindings
 ---@field icons table<string, string> Icons for UI elements
 ---@field syntax table Syntax highlight preferences
+---@field comments table Annotation export formatting
+---@field comments.prefix string|nil Text prepended when yanking annotations
+---@field comments.suffix string|nil Text appended when yanking annotations
 
 ---@type ZdiffConfig
 M.config = {
@@ -116,7 +119,7 @@ M.config = {
     yank_ref = "gy",
     comment = "c",
     delete_comment = "d",
-    yank_comments = "gc",
+    yank_comments = "yc",
   },
   icons = {
     collapsed = "",
@@ -128,6 +131,10 @@ M.config = {
   syntax = {
     mode = "projection", -- "projection"|"hunk"
     max_lines = 8000, -- 0 means unlimited
+  },
+  comments = {
+    prefix = "Feedback for changes:\n",
+    suffix = "",
   },
 }
 
@@ -1426,7 +1433,10 @@ yank_comments = function()
     table.insert(blocks, format_annotation_block(annotation))
   end
 
-  local content = table.concat(blocks, "\n\n")
+  local comment_cfg = M.config.comments or {}
+  local prefix = comment_cfg.prefix or ""
+  local suffix = comment_cfg.suffix or ""
+  local content = prefix .. table.concat(blocks, "\n\n") .. suffix
   set_yank_registers(content)
   notify(string.format("Yanked %d annotation%s", #session_annotations, #session_annotations == 1 and "" or "s"))
 end
