@@ -176,7 +176,10 @@ end
 ---@param entry ZdiffLineMapEntry|nil
 ---@return boolean
 local function is_diff_line_entry(entry)
-  return entry ~= nil and entry.hunk_idx ~= nil and entry.line_idx ~= nil and entry.line_type ~= nil
+  return entry ~= nil
+    and entry.hunk_idx ~= nil
+    and entry.line_idx ~= nil
+    and entry.line_type ~= nil
 end
 
 ---@param annotation ZdiffAnnotation
@@ -206,7 +209,8 @@ local function resolve_annotation(annotation)
             break
           end
           local actual_file = state.files[actual.file_idx]
-          if not actual_file
+          if
+            not actual_file
             or actual_file.path ~= annotation.file_path
             or actual.line_type ~= expected.type
             or actual.old_lnum ~= expected.old_lnum
@@ -248,12 +252,13 @@ local function set_yank_registers(value)
   vim.fn.setreg('"', value)
 
   local has_display = vim.env.DISPLAY or vim.env.WAYLAND_DISPLAY
-  local can_use_clipboard = vim.fn.has("clipboard") == 1 and (
-    has_display
-    or vim.fn.has("macunix") == 1
-    or vim.fn.has("win32") == 1
-    or vim.fn.has("win64") == 1
-  )
+  local can_use_clipboard = vim.fn.has("clipboard") == 1
+    and (
+      has_display
+      or vim.fn.has("macunix") == 1
+      or vim.fn.has("win32") == 1
+      or vim.fn.has("win64") == 1
+    )
 
   if can_use_clipboard then
     pcall(vim.fn.setreg, "+", value)
@@ -306,6 +311,20 @@ local ns_diff = vim.api.nvim_create_namespace("zdiff")
 local ns_syntax = vim.api.nvim_create_namespace("zdiff_syntax")
 local ns_markers = vim.api.nvim_create_namespace("zdiff_markers")
 local ns_annotations = vim.api.nvim_create_namespace("zdiff_annotations")
+
+local function ensure_annotation_highlights()
+  vim.api.nvim_set_hl(
+    0,
+    "ZdiffAnnotationRail",
+    { default = true, link = "DiagnosticWarn" }
+  )
+  vim.api.nvim_set_hl(
+    0,
+    "ZdiffAnnotationBorder",
+    { default = true, link = "DiagnosticWarn" }
+  )
+  vim.api.nvim_set_hl(0, "ZdiffAnnotationNoteText", { default = true, link = "Normal" })
+end
 
 ---@param argv string[]
 ---@param callback fun(code: number, lines: string[])
@@ -904,6 +923,7 @@ render = function()
     return
   end
 
+  ensure_annotation_highlights()
   vim.bo[state.buf].modifiable = true
 
   local lines = {}
@@ -1206,9 +1226,32 @@ render = function()
   table.sort(sign_lines)
   for _, line in ipairs(sign_lines) do
     vim.api.nvim_buf_set_extmark(state.buf, ns_annotations, line - 1, 0, {
-      sign_text = "▎",
-      sign_hl_group = "Comment",
+      sign_text = "▌",
+      sign_hl_group = "ZdiffAnnotationRail",
       priority = 250,
+    })
+  end
+
+  local function border_text(char)
+    return "    " .. char .. string.rep("─", 42)
+  end
+
+  local by_start = {}
+  for _, annotation in ipairs(resolved) do
+    by_start[annotation.start_line] = by_start[annotation.start_line] or {}
+    table.insert(by_start[annotation.start_line], annotation)
+  end
+
+  local sorted_starts = vim.tbl_keys(by_start)
+  table.sort(sorted_starts)
+  for _, start_line in ipairs(sorted_starts) do
+    local border_lines = {}
+    for _ = 1, #by_start[start_line] do
+      table.insert(border_lines, { { border_text("┌"), "ZdiffAnnotationBorder" } })
+    end
+    vim.api.nvim_buf_set_extmark(state.buf, ns_annotations, start_line - 1, 0, {
+      virt_lines = border_lines,
+      virt_lines_above = true,
     })
   end
 
@@ -1218,7 +1261,13 @@ render = function()
     local annotations = by_line[end_line]
     local virt_lines = {}
     for _, annotation in ipairs(annotations) do
-      table.insert(virt_lines, { { "  └ " .. annotation.label, "Comment" } })
+      table.insert(virt_lines, {
+        { border_text("└"), "ZdiffAnnotationBorder" },
+      })
+      table.insert(virt_lines, {
+        { "    ╰─ ", "ZdiffAnnotationBorder" },
+        { annotation.label, "ZdiffAnnotationNoteText" },
+      })
     end
     vim.api.nvim_buf_set_extmark(state.buf, ns_annotations, end_line - 1, 0, {
       virt_lines = virt_lines,
@@ -1436,9 +1485,15 @@ yank_comments = function()
   local comment_cfg = M.config.comments or {}
   local prefix = comment_cfg.prefix or ""
   local suffix = comment_cfg.suffix or ""
-  local content = prefix .. table.concat(blocks, "\n\n") .. suffix
+  local content = prefix .. table.concat(blocks, "\n") .. suffix
   set_yank_registers(content)
-  notify(string.format("Yanked %d annotation%s", #session_annotations, #session_annotations == 1 and "" or "s"))
+  notify(
+    string.format(
+      "Yanked %d annotation%s",
+      #session_annotations,
+      #session_annotations == 1 and "" or "s"
+    )
+  )
 end
 
 _G.zdiff_add_comment_visual = function()
