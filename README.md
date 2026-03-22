@@ -125,7 +125,7 @@ Annotations are kept in memory for the current Neovim session and scoped by diff
 
 You can wrap `yc` output with a configurable prefix/suffix, which is useful when pasting feedback straight into an AI prompt.
 
-Pressing `c` opens a temporary floating editor for the annotation text. Use normal Vim editing inside the float, `:w` to submit, and `q` or `<Esc>` to cancel.
+Pressing `c` opens a temporary floating editor for the annotation text. Use normal Vim editing inside the float, `<S-CR>` or `:w` to submit, and `q` or `<Esc>` to cancel.
 
 Example `yc` output:
 

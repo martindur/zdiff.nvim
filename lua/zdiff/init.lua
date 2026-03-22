@@ -365,6 +365,7 @@ open_annotation_editor = function(selection, on_submit)
     notify("Annotation cancelled", vim.log.levels.INFO)
   end
 
+  vim.keymap.set({ "n", "i" }, "<S-CR>", submit, { buffer = buf, silent = true })
   vim.keymap.set("n", "q", cancel, { buffer = buf, silent = true })
   vim.keymap.set("n", "<Esc>", cancel, { buffer = buf, silent = true })
   vim.api.nvim_create_autocmd("BufWriteCmd", {
@@ -430,6 +431,10 @@ normalize_annotation_text = function(lines)
 end
 
 close_annotation_editor = function()
+  if vim.api.nvim_get_mode().mode:sub(1, 1) == "i" then
+    vim.cmd("stopinsert")
+  end
+
   if
     state.annotation_editor_win and vim.api.nvim_win_is_valid(state.annotation_editor_win)
   then

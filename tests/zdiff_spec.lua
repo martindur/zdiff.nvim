@@ -35,8 +35,8 @@ local function wait_for_loaded(timeout_ms)
   end
 end
 
-local function find_keymap_callback(buf, lhs)
-  local keymaps = vim.api.nvim_buf_get_keymap(buf, "n")
+local function find_keymap_callback(buf, lhs, mode)
+  local keymaps = vim.api.nvim_buf_get_keymap(buf, mode or "n")
   for _, km in ipairs(keymaps) do
     if km.lhs == lhs then
       return km.callback
@@ -481,6 +481,24 @@ describe("zdiff", function()
       assert.equals(1, dbg.annotation_count)
       assert.is_false(dbg.annotation_editor_open)
       assert.equals("Submitted via write", zdiff._debug_rendered_annotations()[1].label)
+    end)
+
+    it("should expose shift-enter submit in insert mode", function()
+      local repo = create_modified_repo()
+      vim.cmd("cd " .. vim.fn.fnameescape(repo))
+
+      zdiff.setup({ default_expanded = true })
+      zdiff.open()
+      wait_for_loaded(5000)
+
+      local buf = vim.api.nvim_get_current_buf()
+      local line = find_buffer_line(buf, "  beta")
+      local editor = zdiff._debug_open_annotation_editor(line, line)
+      assert.is_table(editor)
+
+      local submit_cb = find_keymap_callback(editor.buf, "<S-CR>", "i")
+      assert.is_not_nil(submit_cb, "Shift-Enter insert-mode keymap should be defined")
+      assert.is_true(zdiff._debug_cancel_annotation_editor())
     end)
 
     it("should support deleted-only annotations", function()
