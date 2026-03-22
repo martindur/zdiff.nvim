@@ -87,7 +87,8 @@ These keymaps are available in the zdiff buffer:
                 cursor.
 
     gc          Yank annotations for the current diff target. Output
-                includes file path plus old/new line references.
+                uses concise refs such as `path:12-14 text`, and
+                `path:deleted 12-13 text` for deletion-only ranges.
 
     ?           Show help popup with all available keymaps.
 

@@ -109,6 +109,49 @@ local function create_two_commit_repo()
   return repo
 end
 
+local function create_multihunk_repo()
+  local repo = vim.fn.tempname()
+  vim.fn.mkdir(repo, "p")
+
+  run_sync("git init", repo)
+  run_sync("git config user.name 'zdiff-test'", repo)
+  run_sync("git config user.email 'zdiff@example.com'", repo)
+
+  write_file(repo .. "/multi.txt", {
+    "line 1",
+    "line 2",
+    "line 3",
+    "line 4",
+    "line 5",
+    "line 6",
+    "line 7",
+    "line 8",
+    "line 9",
+    "line 10",
+    "line 11",
+    "line 12",
+  })
+  run_sync("git add .", repo)
+  run_sync("git commit -m 'initial'", repo)
+
+  write_file(repo .. "/multi.txt", {
+    "line 1",
+    "line 2 changed",
+    "line 3",
+    "line 4",
+    "line 5",
+    "line 6",
+    "line 7",
+    "line 8",
+    "line 9",
+    "line 10 changed",
+    "line 11",
+    "line 12",
+  })
+
+  return repo
+end
+
 describe("zdiff", function()
   before_each(function()
     if zdiff._debug_reset then
@@ -326,16 +369,15 @@ describe("zdiff", function()
       local dbg = zdiff._debug_state()
       assert.equals(1, dbg.annotation_count)
       assert.equals(1, dbg.rendered_annotation_count)
+      assert.equals("yes:1", vim.wo[0].signcolumn)
+      assert.equals("Needs follow-up", zdiff._debug_rendered_annotations()[1].label)
 
       local yank_cb = find_keymap_callback(buf, "gc")
       assert.is_not_nil(yank_cb, "Yank annotations keymap should be defined")
       yank_cb()
 
       local content = vim.fn.getreg('"')
-      assert.is_truthy(content:find("%[example.txt%]"))
-      assert.is_truthy(content:find("old: 2%-3"))
-      assert.is_truthy(content:find("new: 2%-4"))
-      assert.is_truthy(content:find("comment: Needs follow%-up"))
+      assert.is_truthy(content:find("example.txt:2%-4 Needs follow%-up"))
 
       local line = find_buffer_line(buf, "  beta changed")
       vim.api.nvim_win_set_cursor(0, { line, 0 })
@@ -362,9 +404,7 @@ describe("zdiff", function()
       yank_cb()
 
       local content = vim.fn.getreg('"')
-      assert.is_truthy(content:find("%[gone.txt%]"))
-      assert.is_truthy(content:find("old: 1"))
-      assert.is_falsy(content:find("new:"))
+      assert.is_truthy(content:find("gone.txt:deleted 1 Remove this"))
     end)
 
     it("should persist annotations for the same diff target across reopen", function()
@@ -441,6 +481,31 @@ describe("zdiff", function()
       assert.equals("worktree", zdiff._debug_state().current_session)
       assert.equals(1, zdiff._debug_state().annotation_count)
       assert.equals(1, zdiff._debug_state().rendered_annotation_count)
+    end)
+  end)
+
+  describe("yank_ref", function()
+    it("should preserve original file:range output across hunks", function()
+      local repo = create_multihunk_repo()
+      vim.cmd("cd " .. vim.fn.fnameescape(repo))
+
+      zdiff.setup({ default_expanded = true })
+      zdiff.open()
+      wait_for_loaded(5000)
+
+      local buf = vim.api.nvim_get_current_buf()
+      local start_line = find_buffer_line(buf, "  line 2")
+      local end_line = find_buffer_line(buf, "  line 10 changed")
+
+      local yank_cb = find_keymap_callback(buf, "gy")
+      assert.is_not_nil(yank_cb, "Yank reference keymap should be defined")
+
+      vim.fn.setpos("'<", { 0, start_line, 1, 0 })
+      vim.fn.setpos("'>", { 0, end_line, 1, 0 })
+      _G.yank_ref_visual()
+
+      local content = vim.fn.getreg('"')
+      assert.equals("multi.txt:2-5, 7-10", content)
     end)
   end)
 end)

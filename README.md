@@ -119,9 +119,9 @@ Tab completion is available for branch and tag names.
 | `gc` | Yank annotations for the current diff target |
 | `?` | Show help |
 
-`gy` works in both normal mode (current line) and visual mode (selection). It outputs semantic refs such as `path old:10-12 new:10-13`, so deleted-only selections are supported.
+`gy` works in both normal mode (current line) and visual mode (selection). It outputs `file:line` / `file:start-end`, ignores deleted lines, and preserves multiple ranges across hunks such as `path:10-15, 1020-1025`.
 
-Annotations are kept in memory for the current Neovim session and scoped by diff target. They reappear when reopening the same zdiff target later in the session, but they are not written to disk.
+Annotations are kept in memory for the current Neovim session and scoped by diff target. They reappear when reopening the same zdiff target later in the session, but they are not written to disk. `gc` exports concise lines like `path/to/file.lua:12-14 tighten this branch`, and uses `path/to/file.lua:deleted 12-13 ...` for deletion-only annotations.
 
 Press `?` while in zdiff to see all available keymaps.
 

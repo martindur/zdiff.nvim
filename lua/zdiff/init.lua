@@ -1,4 +1,6 @@
 local M = {}
+local annotation_format = require("zdiff.annotations")
+local selections = require("zdiff.selections")
 
 -- State
 ---@class ZdiffFile
@@ -164,142 +166,10 @@ local function current_session_key()
   return state.base_ref and ("ref:" .. state.base_ref) or "worktree"
 end
 
----@param lnums number[]
----@return {start: number, finish: number}[]
-local function compress_ranges(lnums)
-  table.sort(lnums)
-  local ranges = {}
-  local current = nil
-
-  for _, lnum in ipairs(lnums) do
-    if not current then
-      current = { start = lnum, finish = lnum }
-    elseif lnum == current.finish + 1 then
-      current.finish = lnum
-    elseif lnum ~= current.finish then
-      table.insert(ranges, current)
-      current = { start = lnum, finish = lnum }
-    end
-  end
-
-  if current then
-    table.insert(ranges, current)
-  end
-
-  return ranges
-end
-
----@param ranges {start: number, finish: number}[]
----@return string|nil
-local function format_ranges(ranges)
-  if #ranges == 0 then
-    return nil
-  end
-
-  local parts = {}
-  for _, range in ipairs(ranges) do
-    if range.start == range.finish then
-      table.insert(parts, tostring(range.start))
-    else
-      table.insert(parts, string.format("%d-%d", range.start, range.finish))
-    end
-  end
-
-  return table.concat(parts, ", ")
-end
-
 ---@param entry ZdiffLineMapEntry|nil
 ---@return boolean
 local function is_diff_line_entry(entry)
   return entry ~= nil and entry.hunk_idx ~= nil and entry.line_idx ~= nil and entry.line_type ~= nil
-end
-
----@param line number
----@return boolean
-local function is_diff_line(line)
-  return is_diff_line_entry(state.line_map[line])
-end
-
----@param line number
----@return ZdiffFile|nil, ZdiffLineMapEntry|nil
-local function get_file_and_mapping(line)
-  local mapping = state.line_map[line]
-  if not mapping or not mapping.file_idx then
-    return nil, nil
-  end
-  return state.files[mapping.file_idx], mapping
-end
-
----@param start_line number
----@param end_line number
----@return {file_path: string, anchor_lines: ZdiffAnnotationAnchorLine[], old_ranges: {start: number, finish: number}[], new_ranges: {start: number, finish: number}[]}|nil, string|nil
-local function collect_annotation_selection(start_line, end_line)
-  if start_line > end_line then
-    start_line, end_line = end_line, start_line
-  end
-
-  local file = nil
-  local anchor_lines = {}
-  local old_lnums = {}
-  local new_lnums = {}
-
-  for line = start_line, end_line do
-    local current_file, mapping = get_file_and_mapping(line)
-    if not current_file or not is_diff_line_entry(mapping) then
-      return nil, "Can only annotate diff lines"
-    end
-
-    if not file then
-      file = current_file
-    elseif file.path ~= current_file.path then
-      return nil, "Cannot annotate across multiple files"
-    end
-
-    table.insert(anchor_lines, {
-      type = mapping.line_type,
-      old_lnum = mapping.old_lnum,
-      new_lnum = mapping.new_lnum,
-    })
-
-    if mapping.old_lnum then
-      table.insert(old_lnums, mapping.old_lnum)
-    end
-    if mapping.new_lnum then
-      table.insert(new_lnums, mapping.new_lnum)
-    end
-  end
-
-  if not file or #anchor_lines == 0 then
-    return nil, "No diff lines selected"
-  end
-
-  return {
-    file_path = file.path,
-    anchor_lines = anchor_lines,
-    old_ranges = compress_ranges(old_lnums),
-    new_ranges = compress_ranges(new_lnums),
-  }, nil
-end
-
----@param selection {file_path: string, anchor_lines: ZdiffAnnotationAnchorLine[], old_ranges: {start: number, finish: number}[], new_ranges: {start: number, finish: number}[]}
----@return string
-local function format_annotation_prompt(selection)
-  local refs = {}
-  local old_ref = format_ranges(selection.old_ranges)
-  local new_ref = format_ranges(selection.new_ranges)
-
-  if old_ref then
-    table.insert(refs, "old:" .. old_ref)
-  end
-  if new_ref then
-    table.insert(refs, "new:" .. new_ref)
-  end
-
-  if #refs == 0 then
-    return "Annotation [" .. selection.file_path .. "]: "
-  end
-
-  return string.format("Annotation [%s %s]: ", selection.file_path, table.concat(refs, " "))
 end
 
 ---@param annotation ZdiffAnnotation
@@ -363,19 +233,7 @@ end
 
 ---@return string
 local function format_annotation_block(annotation)
-  local lines = { "[" .. annotation.file_path .. "]" }
-  local old_ref = format_ranges(annotation.old_ranges)
-  local new_ref = format_ranges(annotation.new_ranges)
-
-  if old_ref then
-    table.insert(lines, "old: " .. old_ref)
-  end
-  if new_ref then
-    table.insert(lines, "new: " .. new_ref)
-  end
-  table.insert(lines, "comment: " .. annotation.text)
-
-  return table.concat(lines, "\n")
+  return annotation_format.format_export_line(annotation)
 end
 
 ---@param value string
@@ -416,7 +274,7 @@ local function apply_zdiff_window_opts(win)
   end
   vim.wo[win].number = false
   vim.wo[win].relativenumber = false
-  vim.wo[win].signcolumn = "no"
+  vim.wo[win].signcolumn = "yes:1"
   vim.wo[win].wrap = false
   vim.wo[win].cursorline = true
 end
@@ -1303,7 +1161,7 @@ render = function()
         id = annotation.id,
         start_line = match.start_line,
         end_line = match.end_line,
-        text = annotation.text,
+        label = annotation_format.format_display_line(annotation),
       })
     elseif not state.loading_files and expanded_files[annotation.file_path] then
       unresolved_ids[annotation.id] = true
@@ -1322,6 +1180,7 @@ render = function()
   end
 
   local by_line = {}
+  local annotated_lines = {}
   for _, annotation in ipairs(resolved) do
     by_line[annotation.end_line] = by_line[annotation.end_line] or {}
     table.insert(by_line[annotation.end_line], annotation)
@@ -1329,6 +1188,20 @@ render = function()
       id = annotation.id,
       start_line = annotation.start_line,
       end_line = annotation.end_line,
+      label = annotation.label,
+    })
+    for line = annotation.start_line, annotation.end_line do
+      annotated_lines[line] = true
+    end
+  end
+
+  local sign_lines = vim.tbl_keys(annotated_lines)
+  table.sort(sign_lines)
+  for _, line in ipairs(sign_lines) do
+    vim.api.nvim_buf_set_extmark(state.buf, ns_annotations, line - 1, 0, {
+      sign_text = "▎",
+      sign_hl_group = "Comment",
+      priority = 250,
     })
   end
 
@@ -1338,7 +1211,7 @@ render = function()
     local annotations = by_line[end_line]
     local virt_lines = {}
     for _, annotation in ipairs(annotations) do
-      table.insert(virt_lines, { { "  └ " .. annotation.text, "Comment" } })
+      table.insert(virt_lines, { { "  └ " .. annotation.label, "Comment" } })
     end
     vim.api.nvim_buf_set_extmark(state.buf, ns_annotations, end_line - 1, 0, {
       virt_lines = virt_lines,
@@ -1422,26 +1295,18 @@ end
 ---@param start_line number
 ---@param end_line number
 local function yank_ref(start_line, end_line)
-  local selection, err = collect_annotation_selection(start_line, end_line)
+  local selection, err = selections.collect_reference_selection(
+    state.line_map,
+    state.files,
+    start_line,
+    end_line
+  )
   if not selection then
     notify("Cannot yank: " .. err, vim.log.levels.WARN)
     return
   end
 
-  local refs = {}
-  local old_ref = format_ranges(selection.old_ranges)
-  local new_ref = format_ranges(selection.new_ranges)
-  if old_ref then
-    table.insert(refs, "old:" .. old_ref)
-  end
-  if new_ref then
-    table.insert(refs, "new:" .. new_ref)
-  end
-
-  local ref = selection.file_path
-  if #refs > 0 then
-    ref = ref .. " " .. table.concat(refs, " ")
-  end
+  local ref = selection.file_path .. ":" .. selections.format_ranges(selection.ranges)
 
   set_yank_registers(ref)
   notify("Yanked: " .. ref)
@@ -1460,7 +1325,12 @@ end
 ---@param text string
 ---@return boolean
 local function store_annotation(start_line, end_line, text)
-  local selection, err = collect_annotation_selection(start_line, end_line)
+  local selection, err = selections.collect_annotation_selection(
+    state.line_map,
+    state.files,
+    start_line,
+    end_line
+  )
   if not selection then
     notify(err, vim.log.levels.WARN)
     return false
@@ -1492,7 +1362,12 @@ add_comment = function(start_line, end_line)
     return
   end
 
-  local selection, err = collect_annotation_selection(start_line, end_line)
+  local selection, err = selections.collect_annotation_selection(
+    state.line_map,
+    state.files,
+    start_line,
+    end_line
+  )
   if not selection then
     notify(err, vim.log.levels.WARN)
     return
@@ -1500,7 +1375,7 @@ add_comment = function(start_line, end_line)
 
   vim.cmd("stopinsert")
   local text = vim.fn.input({
-    prompt = format_annotation_prompt(selection),
+    prompt = annotation_format.format_prompt(selection),
     cancelreturn = nil,
   })
 
@@ -1928,6 +1803,10 @@ end
 
 M._debug_add_annotation = function(start_line, end_line, text)
   return store_annotation(start_line, end_line, text)
+end
+
+M._debug_rendered_annotations = function()
+  return vim.deepcopy(state.rendered_annotations)
 end
 
 M._debug_reset = function()
