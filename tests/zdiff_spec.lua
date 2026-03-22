@@ -52,7 +52,14 @@ local function find_buffer_line(buf, text)
       return idx
     end
   end
-  error("line not found: " .. text)
+  error(
+    "line not found: "
+      .. text
+      .. "\nrendered lines:\n"
+      .. table.concat(vim.tbl_map(function(line)
+        return string.format("%q", line)
+      end, lines), "\n")
+  )
 end
 
 local function create_modified_repo()
@@ -173,6 +180,7 @@ describe("zdiff", function()
         comment = "c",
         delete_comment = "d",
         yank_comments = "yc",
+        toggle_annotations_only = "h",
       },
       icons = {
         collapsed = "",
@@ -217,6 +225,7 @@ describe("zdiff", function()
       assert.equals("projection", zdiff.config.syntax.mode)
       assert.equals(8000, zdiff.config.syntax.max_lines)
       assert.equals("Feedback for changes:\n", zdiff.config.comments.prefix)
+      assert.equals("h", zdiff.config.keymaps.toggle_annotations_only)
     end)
 
     it("should merge user config with defaults", function()
@@ -243,6 +252,7 @@ describe("zdiff", function()
       assert.equals("<Tab>", zdiff.config.keymaps.toggle)
       assert.equals("q", zdiff.config.keymaps.close)
       assert.equals("yc", zdiff.config.keymaps.yank_comments)
+      assert.equals("h", zdiff.config.keymaps.toggle_annotations_only)
     end)
 
     it("should allow overriding icons", function()
@@ -350,18 +360,30 @@ describe("zdiff", function()
       local help_buf = vim.api.nvim_win_get_buf(float_win)
 
       -- Window should still be valid (not closed immediately)
-      assert.is_true(vim.api.nvim_win_is_valid(float_win), "Help window should remain open")
+      assert.is_true(
+        vim.api.nvim_win_is_valid(float_win),
+        "Help window should remain open"
+      )
 
       -- Check buffer content contains expected text
       local lines = vim.api.nvim_buf_get_lines(help_buf, 0, -1, false)
       local content = table.concat(lines, "\n")
 
       assert.is_truthy(content:find("zdiff keymaps"), "Help should contain title")
-      assert.is_truthy(content:find("Go to file"), "Help should contain goto_file description")
+      assert.is_truthy(
+        content:find("Go to file"),
+        "Help should contain goto_file description"
+      )
       assert.is_truthy(content:find("Toggle"), "Help should contain toggle description")
       assert.is_truthy(content:find("Close"), "Help should contain close description")
-      assert.is_truthy(content:find("Add annotation"), "Help should contain annotation description")
-      assert.is_truthy(content:find("Yank annotations"), "Help should contain yank annotations description")
+      assert.is_truthy(
+        content:find("Add annotation"),
+        "Help should contain annotation description"
+      )
+      assert.is_truthy(
+        content:find("Yank annotations"),
+        "Help should contain yank annotations description"
+      )
       assert.is_truthy(content:find("Press any key"), "Help should contain footer")
 
       -- Clean up
@@ -404,6 +426,46 @@ describe("zdiff", function()
       delete_cb()
 
       assert.equals(0, zdiff._debug_state().annotation_count)
+    end)
+
+    it("should show only annotated blocks and still allow goto source", function()
+      local repo = create_modified_repo()
+      vim.cmd("cd " .. vim.fn.fnameescape(repo))
+
+      zdiff.setup({ default_expanded = true })
+      zdiff.open()
+      wait_for_loaded(5000)
+
+      local buf = vim.api.nvim_get_current_buf()
+      local annotated_line = find_buffer_line(buf, "  beta changed")
+      assert.is_true(
+        zdiff._debug_add_annotation(annotated_line, annotated_line, "Check this")
+      )
+
+      local toggle_cb = find_keymap_callback(buf, "h")
+      assert.is_not_nil(toggle_cb, "Annotations-only keymap should be defined")
+      toggle_cb()
+
+      local dbg = zdiff._debug_state()
+      assert.is_true(dbg.annotations_only)
+
+      local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+      local content = table.concat(lines, "\n")
+      assert.is_truthy(content:find("%[annotations only%]"))
+      assert.is_truthy(content:find("example.txt"))
+      assert.is_truthy(content:find("  beta changed"))
+      assert.is_falsy(content:find("  alpha", 1, true))
+      assert.is_falsy(content:find("  gamma", 1, true))
+      assert.is_falsy(content:find("  delta", 1, true))
+
+      local visible_line = find_buffer_line(buf, "  beta changed")
+      vim.api.nvim_win_set_cursor(0, { visible_line, 0 })
+      local goto_cb = find_keymap_callback(buf, "<CR>")
+      assert.is_not_nil(goto_cb, "Goto keymap should be defined")
+      goto_cb()
+
+      assert.is_truthy(vim.api.nvim_buf_get_name(0):match("example%.txt$"))
+      assert.equals(2, vim.api.nvim_win_get_cursor(0)[1])
     end)
 
     it("should submit multiline annotations from the editor float", function()
@@ -605,7 +667,8 @@ describe("zdiff", function()
       zdiff.open()
       wait_for_loaded(5000)
 
-      local line = find_buffer_line(vim.api.nvim_get_current_buf(), "  working tree change")
+      local line =
+        find_buffer_line(vim.api.nvim_get_current_buf(), "  working tree change")
       assert.is_true(zdiff._debug_add_annotation(line, line, "Worktree only"))
       assert.equals(1, zdiff._debug_state().annotation_count)
 

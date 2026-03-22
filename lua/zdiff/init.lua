@@ -1,5 +1,7 @@
 local M = {}
 local annotation_format = require("zdiff.annotations")
+local annotation_focus = require("zdiff.annotation_focus")
+local git = require("zdiff.git")
 local selections = require("zdiff.selections")
 
 -- State
@@ -68,6 +70,7 @@ local selections = require("zdiff.selections")
 ---@field annotation_editor_win number|nil
 ---@field annotation_editor_prev_win number|nil
 ---@field annotation_editor_submit fun(text: string)|nil
+---@field annotations_only boolean
 
 ---@type ZdiffState
 local state = {
@@ -90,6 +93,7 @@ local state = {
   annotation_editor_win = nil,
   annotation_editor_prev_win = nil,
   annotation_editor_submit = nil,
+  annotations_only = false,
 }
 
 -- Forward declarations
@@ -97,6 +101,7 @@ local goto_source
 local toggle_expand
 local toggle_mode
 local show_help
+local toggle_annotations_only
 local render
 local add_comment
 local delete_comment
@@ -104,6 +109,8 @@ local yank_comments
 local open_annotation_editor
 local close_annotation_editor
 local normalize_annotation_text
+local get_git_root = git.get_git_root
+local get_file_diff = git.get_file_diff
 
 -- Configuration
 ---@class ZdiffConfig
@@ -131,6 +138,7 @@ M.config = {
     comment = "c",
     delete_comment = "d",
     yank_comments = "yc",
+    toggle_annotations_only = "h",
   },
   icons = {
     collapsed = "",
@@ -258,6 +266,7 @@ local function format_annotation_block(annotation)
   return annotation_format.format_export_line(annotation)
 end
 
+---@return table<number, table<number, table<number, boolean>>>
 ---@param label string
 ---@return table[]
 local function build_annotation_note_lines(label)
@@ -571,248 +580,6 @@ local function run_command_async(argv, callback, opts)
       callback(1, {})
     end)
   end
-end
-
----Get the git root directory
----@return string|nil
-local function get_git_root()
-  local result = vim.fn.systemlist("git rev-parse --show-toplevel")
-  if vim.v.shell_error ~= 0 then
-    return nil
-  end
-  return result[1]
-end
-
----@param rel_path string
----@return number
-local function count_file_lines(rel_path)
-  local git_root = get_git_root()
-  if not git_root then
-    return 0
-  end
-  local filepath = git_root .. "/" .. rel_path
-  local line_count = 0
-  local file = io.open(filepath, "r")
-  if file then
-    for _ in file:lines() do
-      line_count = line_count + 1
-    end
-    file:close()
-  end
-  return line_count
-end
-
----Asynchronously parse git diff stats output
----@param base_ref string|nil git ref to diff against, or nil for uncommitted
----@param done fun(stats: table<string, {insertions: number, deletions: number, status: string}>)
-local function get_diff_stats_async(base_ref, done)
-  local diff_target
-  if base_ref then
-    diff_target = base_ref .. "...HEAD"
-  else
-    diff_target = "HEAD"
-  end
-
-  local stats = {}
-  run_command_async({ "git", "diff", "--numstat", diff_target }, function(_, result)
-    for _, line in ipairs(result) do
-      local ins, del, path = line:match("^(%d+)%s+(%d+)%s+(.+)$")
-      if path then
-        stats[path] = {
-          insertions = tonumber(ins) or 0,
-          deletions = tonumber(del) or 0,
-          status = "M",
-        }
-      end
-    end
-
-    run_command_async(
-      { "git", "diff", "--name-status", diff_target },
-      function(_, status_result)
-        for _, line in ipairs(status_result) do
-          local status, path = line:match("^(%a)%s+(.+)$")
-          if path and stats[path] then
-            stats[path].status = status
-          elseif path then
-            stats[path] = { insertions = 0, deletions = 0, status = status }
-          end
-        end
-
-        if base_ref then
-          done(stats)
-          return
-        end
-
-        run_command_async(
-          { "git", "ls-files", "--others", "--exclude-standard" },
-          function(_, untracked_result)
-            for _, path in ipairs(untracked_result) do
-              if path ~= "" and not stats[path] then
-                stats[path] = {
-                  insertions = count_file_lines(path),
-                  deletions = 0,
-                  status = "?",
-                }
-              end
-            end
-            done(stats)
-          end
-        )
-      end
-    )
-  end)
-end
-
----Parse a unified diff hunk header
----@param header string the @@ line
----@return number old_start, number old_count, number new_start, number new_count
-local function parse_hunk_header(header)
-  local old_start, old_count, new_start, new_count =
-    header:match("^@@ %-(%d+),?(%d*) %+(%d+),?(%d*) @@")
-  return tonumber(old_start) or 0,
-    tonumber(old_count) or 1,
-    tonumber(new_start) or 0,
-    tonumber(new_count) or 1
-end
-
----Parse diff output for a single file into hunks
----@param diff_lines string[]
----@return ZdiffHunk[]
-local function parse_diff_hunks(diff_lines)
-  local hunks = {}
-  local current_hunk = nil
-  local old_lnum, new_lnum = 0, 0
-
-  for _, line in ipairs(diff_lines) do
-    if line:match("^@@") then
-      -- New hunk
-      if current_hunk then
-        table.insert(hunks, current_hunk)
-      end
-      local old_start, old_count, new_start, new_count = parse_hunk_header(line)
-      old_lnum = old_start
-      new_lnum = new_start
-      current_hunk = {
-        old_start = old_start,
-        old_count = old_count,
-        new_start = new_start,
-        new_count = new_count,
-        lines = {},
-      }
-    elseif current_hunk then
-      local diff_line = {
-        text = line:sub(2), -- Remove the +/- prefix
-        type = "context",
-        new_lnum = nil,
-        old_lnum = nil,
-      }
-
-      if line:match("^%+") then
-        diff_line.type = "add"
-        diff_line.new_lnum = new_lnum
-        new_lnum = new_lnum + 1
-      elseif line:match("^%-") then
-        diff_line.type = "del"
-        diff_line.old_lnum = old_lnum
-        old_lnum = old_lnum + 1
-      elseif line:match("^ ") or line == "" then
-        diff_line.type = "context"
-        diff_line.new_lnum = new_lnum
-        diff_line.old_lnum = old_lnum
-        new_lnum = new_lnum + 1
-        old_lnum = old_lnum + 1
-      end
-
-      table.insert(current_hunk.lines, diff_line)
-    end
-  end
-
-  if current_hunk then
-    table.insert(hunks, current_hunk)
-  end
-
-  return hunks
-end
-
----Get diff hunks for a specific file
----@param filepath string
----@param base_ref string|nil git ref to diff against, or nil for uncommitted
----@param status string|nil file status (e.g., "M", "A", "D", "?")
----@return ZdiffHunk[]
-local function get_file_diff(filepath, base_ref, status)
-  -- For untracked files, show entire file as additions
-  if status == "?" then
-    local git_root = get_git_root()
-    local full_path = git_root .. "/" .. filepath
-    local file = io.open(full_path, "r")
-    if not file then
-      return {}
-    end
-
-    local lines = {}
-    for line in file:lines() do
-      table.insert(lines, { type = "add", text = line, new_lnum = #lines + 1 })
-    end
-    file:close()
-
-    if #lines == 0 then
-      return {}
-    end
-
-    return {
-      {
-        header = string.format("@@ -0,0 +1,%d @@ (new file)", #lines),
-        old_start = 0,
-        old_count = 0,
-        new_start = 1,
-        new_count = #lines,
-        lines = lines,
-      },
-    }
-  end
-
-  local cmd
-  if base_ref then
-    cmd = string.format(
-      "git diff %s...HEAD -- %s",
-      vim.fn.shellescape(base_ref),
-      vim.fn.shellescape(filepath)
-    )
-  else
-    cmd = string.format("git diff HEAD -- %s", vim.fn.shellescape(filepath))
-  end
-
-  local result = vim.fn.systemlist(cmd)
-  if vim.v.shell_error ~= 0 then
-    return {}
-  end
-
-  return parse_diff_hunks(result)
-end
-
----@param base_ref string|nil git ref to diff against, or nil for uncommitted
----@param done fun(files: ZdiffFile[])
-local function load_files_async(base_ref, done)
-  get_diff_stats_async(base_ref, function(stats)
-    local files = {}
-
-    for path, info in pairs(stats) do
-      table.insert(files, {
-        path = path,
-        status = info.status,
-        insertions = info.insertions,
-        deletions = info.deletions,
-        expanded = M.config.default_expanded,
-        hunks = {},
-      })
-    end
-
-    table.sort(files, function(a, b)
-      return a.path < b.path
-    end)
-
-    done(files)
-  end)
 end
 
 ---Get the status icon for a file
@@ -1130,6 +897,14 @@ render = function()
     normalize_enum(syntax_cfg.mode, { projection = true, hunk = true }, "projection")
   local markers = {} -- {line_idx, text, hl_group}
   state.line_map = {}
+  local annotation_visibility = state.annotations_only
+      and annotation_focus.collect_visibility(state.files, current_annotations(), function(file)
+        if #file.hunks == 0 then
+          file.hunks = get_file_diff(file.path, state.base_ref, file.status)
+        end
+        return file.hunks
+      end)
+    or nil
 
   -- Header
   local mode_text
@@ -1137,6 +912,9 @@ render = function()
     mode_text = "Changes vs " .. state.base_ref
   else
     mode_text = "Uncommitted changes"
+  end
+  if state.annotations_only then
+    mode_text = mode_text .. " [annotations only]"
   end
   if state.loading_files then
     mode_text = mode_text .. " (loading...)"
@@ -1156,6 +934,11 @@ render = function()
     table.insert(highlights, { #lines, "Comment", 0, -1 })
   else
     for file_idx, file in ipairs(state.files) do
+      local visible_hunks = annotation_visibility and annotation_visibility[file_idx] or nil
+      if state.annotations_only and not visible_hunks then
+        goto continue_files
+      end
+
       -- File header line
       local icon = file.expanded and M.config.icons.expanded or M.config.icons.collapsed
       local status_icon = get_status_icon(file.status)
@@ -1198,6 +981,11 @@ render = function()
         local projection_lines = {}
 
         for hunk_idx, hunk in ipairs(file.hunks) do
+          local visible_lines = visible_hunks and visible_hunks[hunk_idx] or nil
+          if state.annotations_only and not visible_lines then
+            goto continue_hunks
+          end
+
           -- Hunk header
           local hunk_header = string.format(
             "  @@ -%d,%d +%d,%d @@",
@@ -1218,6 +1006,10 @@ render = function()
 
           -- Diff lines
           for line_idx, diff_line in ipairs(hunk.lines) do
+            if state.annotations_only and not (visible_lines and visible_lines[line_idx]) then
+              goto continue_diff_lines
+            end
+
             local prefix = "  "
             local display_line = prefix .. diff_line.text
             table.insert(lines, display_line)
@@ -1263,7 +1055,11 @@ render = function()
                 { buffer_line = #lines, prefix_len = #prefix }
               )
             end
+
+            ::continue_diff_lines::
           end
+
+          ::continue_hunks::
         end
 
         -- Apply syntax highlighting if we have a language
@@ -1318,7 +1114,15 @@ render = function()
           end
         end
       end
+
+      ::continue_files::
     end
+  end
+
+  if state.annotations_only and #lines == 2 then
+    table.insert(lines, "")
+    table.insert(lines, "  No annotated blocks")
+    table.insert(highlights, { #lines, "Comment", 0, -1 })
   end
 
   -- Set lines
@@ -1655,6 +1459,31 @@ delete_comment = function()
   notify("No annotation on this line", vim.log.levels.WARN)
 end
 
+toggle_annotations_only = function()
+  state.annotations_only = not state.annotations_only
+
+  if state.annotations_only then
+    local visibility = annotation_focus.collect_visibility(
+      state.files,
+      current_annotations(),
+      function(file)
+        if #file.hunks == 0 then
+          file.hunks = get_file_diff(file.path, state.base_ref, file.status)
+        end
+        return file.hunks
+      end
+    )
+    for file_idx, _ in pairs(visibility) do
+      local file = state.files[file_idx]
+      if file then
+        file.expanded = true
+      end
+    end
+  end
+
+  render()
+end
+
 yank_comments = function()
   local session_annotations = current_annotations()
   if #session_annotations == 0 then
@@ -1697,6 +1526,13 @@ show_help = function()
     { M.config.keymaps.close, "Close zdiff" },
     { M.config.keymaps.help, "Show this help" },
   }
+
+  if M.config.keymaps.toggle_annotations_only then
+    table.insert(keymaps, {
+      M.config.keymaps.toggle_annotations_only,
+      "Toggle annotations-only view",
+    })
+  end
 
   if M.config.keymaps.yank_ref then
     table.insert(keymaps, { M.config.keymaps.yank_ref, "Yank file:line reference" })
@@ -1822,7 +1658,7 @@ local function refresh()
   state.syntax_projection_cache = {}
   render()
 
-  load_files_async(state.base_ref, function(files)
+  git.load_files_async(state.base_ref, M.config.default_expanded, function(files)
     if refresh_seq ~= state.refresh_seq then
       return
     end
@@ -1905,6 +1741,7 @@ local function close()
   state.refresh_seq = state.refresh_seq + 1
   state.syntax_jobs = {}
   state.syntax_projection_cache = {}
+  state.annotations_only = false
 end
 
 ---Create the zdiff buffer and window
@@ -2012,6 +1849,13 @@ function M.open(base_ref)
     })
   end
 
+  if M.config.keymaps.toggle_annotations_only then
+    vim.keymap.set("n", M.config.keymaps.toggle_annotations_only, toggle_annotations_only, {
+      buffer = state.buf,
+      silent = true,
+    })
+  end
+
   -- Auto-refresh when returning to zdiff buffer
   vim.api.nvim_create_autocmd("BufEnter", {
     buffer = state.buf,
@@ -2019,7 +1863,7 @@ function M.open(base_ref)
       state.win = vim.api.nvim_get_current_win()
       save_window_opts(state.win)
       apply_zdiff_window_opts(state.win)
-      if state.loading_files then
+      if state.loading_files or #state.files == 0 then
         return
       end
       refresh_debounced(200)
@@ -2122,13 +1966,14 @@ M._debug_rendered_annotations = function()
 end
 
 M._debug_reset = function()
+  state.annotations_only = false
   state.files = {}
   state.buf = nil
   state.win = nil
   state.base_ref = nil
   state.line_map = {}
   state.loading_files = false
-  state.refresh_seq = 0
+  state.refresh_seq = state.refresh_seq + 1
   if state.refresh_timer then
     state.refresh_timer:stop()
     state.refresh_timer:close()
@@ -2154,6 +1999,7 @@ M._debug_state = function()
     rendered_annotation_count = #state.rendered_annotations,
     annotation_editor_open = state.annotation_editor_win ~= nil
       and vim.api.nvim_win_is_valid(state.annotation_editor_win),
+    annotations_only = state.annotations_only,
   }
 end
 

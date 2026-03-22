@@ -94,6 +94,11 @@ These keymaps are available in the zdiff buffer:
                 This is intended to be easy to paste into AI review
                 workflows.
 
+    h           Toggle annotations-only view. This hides unrelated
+                diff content and keeps only annotated blocks visible.
+                The goto-file key still works on visible diff lines in
+                this view.
+
     ?           Show help popup with all available keymaps.
 
 All keymaps are configurable via |zdiff-configuration|.
@@ -122,6 +127,7 @@ Call the setup function with an optional configuration table: >lua
         comment = "c",
         delete_comment = "d",
         yank_comments = "yc",
+        toggle_annotations_only = "h",
       },
 
       -- Icons for UI elements

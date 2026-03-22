@@ -117,11 +117,14 @@ Tab completion is available for branch and tag names.
 | `c` | Add annotation on current line / visual selection |
 | `d` | Delete annotation under cursor |
 | `yc` | Yank annotations for the current diff target |
+| `h` | Toggle annotations-only view |
 | `?` | Show help |
 
 `gy` works in both normal mode (current line) and visual mode (selection). It outputs `file:line` / `file:start-end`, ignores deleted lines, and preserves multiple ranges across hunks such as `path:10-15, 1020-1025`.
 
 Annotations are kept in memory for the current Neovim session and scoped by diff target. They reappear when reopening the same zdiff target later in the session, but they are not written to disk. `yc` exports concise lines like `path/to/file.lua:12-14 tighten this branch`, and uses `path/to/file.lua:12-13(deleted) ...` for deletion-only annotations.
+
+`h` switches zdiff into an annotations-only view that hides unrelated diff content and keeps only annotated blocks visible. `goto_file` still works from those visible diff lines.
 
 You can wrap `yc` output with a configurable prefix/suffix, which is useful when pasting feedback straight into an AI prompt.
 
@@ -160,6 +163,7 @@ require("zdiff").setup({
     comment = "c",
     delete_comment = "d",
     yank_comments = "yc",
+    toggle_annotations_only = "h",
   },
 
   -- Icons for UI elements
