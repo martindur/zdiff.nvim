@@ -125,6 +125,15 @@ Annotations are kept in memory for the current Neovim session and scoped by diff
 
 You can wrap `yc` output with a configurable prefix/suffix, which is useful when pasting feedback straight into an AI prompt.
 
+Example `yc` output:
+
+```text
+Feedback for changes:
+tests/zdiff_spec.lua:216-219 test comment
+tests/zdiff_spec.lua:230-232 another one
+lua/zdiff/init.lua:1429(deleted) commenting on a deleted line
+```
+
 Press `?` while in zdiff to see all available keymaps.
 
 ## Configuration
@@ -211,6 +220,33 @@ require("zdiff").setup({
     max_lines = 12000,
   },
 })
+```
+
+#### AI feedback export
+
+```lua
+require("zdiff").setup({
+  comments = {
+    prefix = "Feedback for changes:\n",
+    suffix = "\nPlease address these review comments.",
+  },
+})
+```
+
+#### Theme annotation highlights
+
+You can override the annotation UI with standard highlight groups:
+
+- `ZdiffAnnotationRail`
+- `ZdiffAnnotationBorder`
+- `ZdiffAnnotationNoteText`
+
+Example:
+
+```lua
+vim.api.nvim_set_hl(0, "ZdiffAnnotationRail", { fg = "#e5a524" })
+vim.api.nvim_set_hl(0, "ZdiffAnnotationBorder", { fg = "#e5a524" })
+vim.api.nvim_set_hl(0, "ZdiffAnnotationNoteText", { fg = "#f5f1e8", italic = true })
 ```
 
 ## Health Check

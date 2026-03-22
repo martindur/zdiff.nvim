@@ -89,6 +89,8 @@ These keymaps are available in the zdiff buffer:
     yc          Yank annotations for the current diff target. Output
                 uses concise refs such as `path:12-14 text`, and
                 `path:12-13(deleted) text` for deletion-only ranges.
+                This is intended to be easy to paste into AI review
+                workflows.
 
     ?           Show help popup with all available keymaps.
 
@@ -171,6 +173,20 @@ comments ~
     Type: `table`
 
     Controls prefix/suffix text wrapped around `yc` annotation output.
+    Default prefix: `"Feedback for changes:\n"`
+
+                                                        *zdiff-highlights*
+HIGHLIGHTS ~
+    Annotation UI can be themed with these highlight groups:
+
+    `ZdiffAnnotationRail`
+        Gutter rail shown for annotated lines.
+
+    `ZdiffAnnotationBorder`
+        Border/callout connector shown around annotation blocks.
+
+    `ZdiffAnnotationNoteText`
+        Text of the rendered annotation note.
 
 ==============================================================================
 6. FUNCTIONS                                                 *zdiff-functions*
