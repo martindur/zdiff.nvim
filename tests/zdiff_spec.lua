@@ -406,6 +406,83 @@ describe("zdiff", function()
       assert.equals(0, zdiff._debug_state().annotation_count)
     end)
 
+    it("should submit multiline annotations from the editor float", function()
+      local repo = create_modified_repo()
+      vim.cmd("cd " .. vim.fn.fnameescape(repo))
+
+      zdiff.setup({ default_expanded = true })
+      zdiff.open()
+      wait_for_loaded(5000)
+
+      local buf = vim.api.nvim_get_current_buf()
+      local line = find_buffer_line(buf, "  beta")
+      local editor = zdiff._debug_open_annotation_editor(line, line)
+      assert.is_table(editor)
+      assert.is_true(vim.api.nvim_win_is_valid(editor.win))
+      assert.is_true(vim.api.nvim_buf_is_valid(editor.buf))
+
+      vim.api.nvim_buf_set_lines(editor.buf, 0, -1, false, {
+        "Needs follow-up.",
+        "",
+        "Please simplify this path.",
+      })
+
+      assert.is_true(zdiff._debug_submit_annotation_editor())
+
+      local dbg = zdiff._debug_state()
+      assert.equals(1, dbg.annotation_count)
+      assert.is_false(dbg.annotation_editor_open)
+      assert.equals(
+        "Needs follow-up.\n\nPlease simplify this path.",
+        zdiff._debug_rendered_annotations()[1].label
+      )
+    end)
+
+    it("should cancel annotation editor without creating an annotation", function()
+      local repo = create_modified_repo()
+      vim.cmd("cd " .. vim.fn.fnameescape(repo))
+
+      zdiff.setup({ default_expanded = true })
+      zdiff.open()
+      wait_for_loaded(5000)
+
+      local buf = vim.api.nvim_get_current_buf()
+      local line = find_buffer_line(buf, "  beta")
+      local editor = zdiff._debug_open_annotation_editor(line, line)
+      assert.is_table(editor)
+
+      assert.is_true(zdiff._debug_cancel_annotation_editor())
+
+      local dbg = zdiff._debug_state()
+      assert.equals(0, dbg.annotation_count)
+      assert.is_false(dbg.annotation_editor_open)
+    end)
+
+    it("should submit annotation editor with :write", function()
+      local repo = create_modified_repo()
+      vim.cmd("cd " .. vim.fn.fnameescape(repo))
+
+      zdiff.setup({ default_expanded = true })
+      zdiff.open()
+      wait_for_loaded(5000)
+
+      local buf = vim.api.nvim_get_current_buf()
+      local line = find_buffer_line(buf, "  beta")
+      local editor = zdiff._debug_open_annotation_editor(line, line)
+      assert.is_table(editor)
+      assert.is_true(vim.api.nvim_win_is_valid(editor.win))
+      assert.is_true(vim.api.nvim_buf_is_valid(editor.buf))
+
+      vim.api.nvim_buf_set_lines(editor.buf, 0, -1, false, { "Submitted via write" })
+      vim.api.nvim_set_current_win(editor.win)
+      vim.cmd("write")
+
+      local dbg = zdiff._debug_state()
+      assert.equals(1, dbg.annotation_count)
+      assert.is_false(dbg.annotation_editor_open)
+      assert.equals("Submitted via write", zdiff._debug_rendered_annotations()[1].label)
+    end)
+
     it("should support deleted-only annotations", function()
       local repo = create_deleted_repo()
       vim.cmd("cd " .. vim.fn.fnameescape(repo))

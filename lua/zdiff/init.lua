@@ -64,6 +64,10 @@ local selections = require("zdiff.selections")
 ---@field annotations table<string, ZdiffAnnotation[]>
 ---@field next_annotation_id integer
 ---@field rendered_annotations table<integer, {id: integer, start_line: integer, end_line: integer}>
+---@field annotation_editor_buf number|nil
+---@field annotation_editor_win number|nil
+---@field annotation_editor_prev_win number|nil
+---@field annotation_editor_submit fun(text: string)|nil
 
 ---@type ZdiffState
 local state = {
@@ -82,6 +86,10 @@ local state = {
   annotations = {},
   next_annotation_id = 0,
   rendered_annotations = {},
+  annotation_editor_buf = nil,
+  annotation_editor_win = nil,
+  annotation_editor_prev_win = nil,
+  annotation_editor_submit = nil,
 }
 
 -- Forward declarations
@@ -93,6 +101,9 @@ local render
 local add_comment
 local delete_comment
 local yank_comments
+local open_annotation_editor
+local close_annotation_editor
+local normalize_annotation_text
 
 -- Configuration
 ---@class ZdiffConfig
@@ -247,6 +258,139 @@ local function format_annotation_block(annotation)
   return annotation_format.format_export_line(annotation)
 end
 
+---@param label string
+---@return table[]
+local function build_annotation_note_lines(label)
+  local virt_lines = {}
+  local parts = vim.split(label, "\n", { plain = true })
+
+  for idx, part in ipairs(parts) do
+    if idx == #parts then
+      table.insert(virt_lines, {
+        { "    ╰─ ", "ZdiffAnnotationBorder" },
+        { part, "ZdiffAnnotationNoteText" },
+      })
+    else
+      table.insert(virt_lines, {
+        { "    |  ", "ZdiffAnnotationBorder" },
+        { part, "ZdiffAnnotationNoteText" },
+      })
+    end
+  end
+
+  return virt_lines
+end
+
+---@param selection {file_path: string}
+---@param on_submit fun(text: string)
+open_annotation_editor = function(selection, on_submit)
+  close_annotation_editor()
+
+  local ui = vim.api.nvim_list_uis()[1]
+  local editor_width = ui and ui.width or vim.o.columns
+  local editor_height = ui and ui.height or vim.o.lines
+  local width = math.max(50, math.min(100, editor_width - 10))
+  local height = math.max(8, math.min(14, editor_height - 6))
+  local row = math.floor((editor_height - height) / 2)
+  local col = math.floor((editor_width - width) / 2)
+
+  local title = " Annotation: " .. selection.file_path .. " "
+  if #title > width - 4 then
+    title = " Annotation "
+  end
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_name(
+    buf,
+    string.format("zdiff://annotation/%s/%d", selection.file_path, vim.loop.hrtime())
+  )
+  vim.bo[buf].buftype = "acwrite"
+  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].swapfile = false
+  vim.bo[buf].filetype = "markdown"
+  vim.bo[buf].modifiable = true
+  vim.bo[buf].undofile = false
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "" })
+
+  local prev_win = vim.api.nvim_get_current_win()
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    row = row,
+    col = col,
+    width = width,
+    height = height,
+    style = "minimal",
+    border = "rounded",
+    title = title,
+    title_pos = "center",
+  })
+
+  state.annotation_editor_buf = buf
+  state.annotation_editor_win = win
+  state.annotation_editor_prev_win = prev_win
+  state.annotation_editor_submit = on_submit
+
+  vim.wo[win].wrap = true
+  vim.wo[win].linebreak = true
+  vim.wo[win].number = false
+  vim.wo[win].relativenumber = false
+  vim.wo[win].signcolumn = "no"
+  vim.wo[win].cursorline = false
+
+  local submit = function()
+    if
+      not (
+        state.annotation_editor_buf
+        and vim.api.nvim_buf_is_valid(state.annotation_editor_buf)
+      )
+    then
+      return
+    end
+    local text = normalize_annotation_text(
+      vim.api.nvim_buf_get_lines(state.annotation_editor_buf, 0, -1, false)
+    )
+    local submit_cb = state.annotation_editor_submit
+    close_annotation_editor()
+    if text == "" then
+      notify("Annotation cancelled", vim.log.levels.INFO)
+      return
+    end
+    if submit_cb then
+      submit_cb(text)
+    end
+  end
+
+  local cancel = function()
+    close_annotation_editor()
+    notify("Annotation cancelled", vim.log.levels.INFO)
+  end
+
+  vim.keymap.set("n", "q", cancel, { buffer = buf, silent = true })
+  vim.keymap.set("n", "<Esc>", cancel, { buffer = buf, silent = true })
+  vim.api.nvim_create_autocmd("BufWriteCmd", {
+    buffer = buf,
+    callback = submit,
+  })
+  vim.api.nvim_create_autocmd("WinClosed", {
+    once = true,
+    callback = function(args)
+      if tonumber(args.match) == win then
+        state.annotation_editor_buf = nil
+        state.annotation_editor_win = nil
+        state.annotation_editor_prev_win = nil
+        state.annotation_editor_submit = nil
+      end
+    end,
+  })
+
+  vim.schedule(function()
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_set_current_win(win)
+      vim.cmd("startinsert")
+    end
+  end)
+end
+
 ---@param value string
 local function set_yank_registers(value)
   vim.fn.setreg('"', value)
@@ -263,6 +407,52 @@ local function set_yank_registers(value)
   if can_use_clipboard then
     pcall(vim.fn.setreg, "+", value)
   end
+end
+
+---@param lines string[]
+---@return string
+normalize_annotation_text = function(lines)
+  local start_idx = 1
+  local end_idx = #lines
+
+  while start_idx <= end_idx and lines[start_idx]:match("^%s*$") do
+    start_idx = start_idx + 1
+  end
+  while end_idx >= start_idx and lines[end_idx]:match("^%s*$") do
+    end_idx = end_idx - 1
+  end
+
+  if start_idx > end_idx then
+    return ""
+  end
+
+  return table.concat(vim.list_slice(lines, start_idx, end_idx), "\n")
+end
+
+close_annotation_editor = function()
+  if
+    state.annotation_editor_win and vim.api.nvim_win_is_valid(state.annotation_editor_win)
+  then
+    vim.api.nvim_win_close(state.annotation_editor_win, true)
+  elseif
+    state.annotation_editor_buf and vim.api.nvim_buf_is_valid(state.annotation_editor_buf)
+  then
+    vim.api.nvim_buf_delete(state.annotation_editor_buf, { force = true })
+  end
+
+  if
+    state.annotation_editor_prev_win
+    and vim.api.nvim_win_is_valid(state.annotation_editor_prev_win)
+  then
+    vim.api.nvim_set_current_win(state.annotation_editor_prev_win)
+  elseif state.win and vim.api.nvim_win_is_valid(state.win) then
+    vim.api.nvim_set_current_win(state.win)
+  end
+
+  state.annotation_editor_buf = nil
+  state.annotation_editor_win = nil
+  state.annotation_editor_prev_win = nil
+  state.annotation_editor_submit = nil
 end
 
 ---@param win number
@@ -1264,10 +1454,9 @@ render = function()
       table.insert(virt_lines, {
         { border_text("└"), "ZdiffAnnotationBorder" },
       })
-      table.insert(virt_lines, {
-        { "    ╰─ ", "ZdiffAnnotationBorder" },
-        { annotation.label, "ZdiffAnnotationNoteText" },
-      })
+      for _, note_line in ipairs(build_annotation_note_lines(annotation.label)) do
+        table.insert(virt_lines, note_line)
+      end
     end
     vim.api.nvim_buf_set_extmark(state.buf, ns_annotations, end_line - 1, 0, {
       virt_lines = virt_lines,
@@ -1429,20 +1618,11 @@ add_comment = function(start_line, end_line)
     return
   end
 
-  vim.cmd("stopinsert")
-  local text = vim.fn.input({
-    prompt = annotation_format.format_prompt(selection),
-    cancelreturn = nil,
-  })
-
-  if not text or text == "" then
-    notify("Annotation cancelled", vim.log.levels.INFO)
-    return
-  end
-
-  if store_annotation(start_line, end_line, text) then
-    notify("Annotation added", vim.log.levels.INFO)
-  end
+  open_annotation_editor(selection, function(text)
+    if store_annotation(start_line, end_line, text) then
+      notify("Annotation added", vim.log.levels.INFO)
+    end
+  end)
 end
 
 delete_comment = function()
@@ -1870,6 +2050,68 @@ M._debug_add_annotation = function(start_line, end_line, text)
   return store_annotation(start_line, end_line, text)
 end
 
+M._debug_open_annotation_editor = function(start_line, end_line)
+  local selection, err = selections.collect_annotation_selection(
+    state.line_map,
+    state.files,
+    start_line,
+    end_line
+  )
+  if not selection then
+    return nil, err
+  end
+  open_annotation_editor(selection, function(text)
+    if store_annotation(start_line, end_line, text) then
+      notify("Annotation added", vim.log.levels.INFO)
+    end
+  end)
+  return {
+    buf = state.annotation_editor_buf,
+    win = state.annotation_editor_win,
+  }
+end
+
+M._debug_submit_annotation_editor = function(lines)
+  if
+    not (
+      state.annotation_editor_buf
+      and vim.api.nvim_buf_is_valid(state.annotation_editor_buf)
+    )
+  then
+    return false
+  end
+  if lines then
+    vim.api.nvim_buf_set_lines(state.annotation_editor_buf, 0, -1, false, lines)
+  end
+  local text = normalize_annotation_text(
+    vim.api.nvim_buf_get_lines(state.annotation_editor_buf, 0, -1, false)
+  )
+  local submit_cb = state.annotation_editor_submit
+  close_annotation_editor()
+  if text == "" then
+    notify("Annotation cancelled", vim.log.levels.INFO)
+    return false
+  end
+  if submit_cb then
+    submit_cb(text)
+  end
+  return true
+end
+
+M._debug_cancel_annotation_editor = function()
+  if
+    not (
+      state.annotation_editor_buf
+      and vim.api.nvim_buf_is_valid(state.annotation_editor_buf)
+    )
+  then
+    return false
+  end
+  close_annotation_editor()
+  notify("Annotation cancelled", vim.log.levels.INFO)
+  return true
+end
+
 M._debug_rendered_annotations = function()
   return vim.deepcopy(state.rendered_annotations)
 end
@@ -1894,6 +2136,7 @@ M._debug_reset = function()
   state.annotations = {}
   state.next_annotation_id = 0
   state.rendered_annotations = {}
+  close_annotation_editor()
 end
 
 M._debug_state = function()
@@ -1904,6 +2147,8 @@ M._debug_state = function()
     current_session = current_session_key(),
     annotation_count = #current_annotations(),
     rendered_annotation_count = #state.rendered_annotations,
+    annotation_editor_open = state.annotation_editor_win ~= nil
+      and vim.api.nvim_win_is_valid(state.annotation_editor_win),
   }
 end
 

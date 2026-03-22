@@ -81,7 +81,8 @@ These keymaps are available in the zdiff buffer:
     q           Close zdiff and delete the buffer.
 
     c           Add an annotation on the current diff line or visual
-                selection.
+                selection. Opens a temporary floating editor. Use
+                `:w` to submit and `q` or `<Esc>` to cancel.
 
     d           Delete the annotation whose visible range contains the
                 cursor.
