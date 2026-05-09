@@ -15,6 +15,7 @@ Easily yank changes without including git markers or hunk headers
 - View uncommitted changes or changes compared to any git ref
 - Expand/collapse files to see inline diffs
 - Treesitter syntax highlighting in diff views
+- Sticky file headers while scrolling expanded diffs
 - Jump directly to source files at the correct line
 - Auto-refresh when returning to zdiff buffer
 - Tab completion for branch/tag names
