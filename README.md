@@ -218,6 +218,12 @@ Stress test (async refresh + repeated open/close memory baseline check + open-ti
 make stress-test
 ```
 
+Open a generated fixture repo with many file types and expanded diffs for manual syntax highlighting checks:
+
+```bash
+make syntax-gallery
+```
+
 ## License
 
 MIT

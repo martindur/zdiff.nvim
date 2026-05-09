@@ -1,4 +1,4 @@
-.PHONY: test test-file stress-test lint
+.PHONY: test test-file stress-test syntax-gallery lint
 
 test:
 	nvim --headless -u tests/minimal_init.lua -c "PlenaryBustedDirectory tests/ {minimal_init = 'tests/minimal_init.lua', sequential = true}"
@@ -9,6 +9,9 @@ test-file:
 
 stress-test:
 	nvim --headless -u tests/minimal_init.lua -c "lua require('tests.stress').run()" -c "qa!"
+
+syntax-gallery:
+	nvim -u tests/minimal_init.lua -c "lua require('tests.syntax_gallery').open()"
 
 # Lint with luacheck (if installed)
 lint:
