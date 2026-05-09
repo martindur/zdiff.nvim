@@ -22,6 +22,15 @@ local function line_with_probe(buf, probe)
   return nil, nil
 end
 
+local function list_contains(values, needle)
+  for _, value in ipairs(values) do
+    if value == needle then
+      return true
+    end
+  end
+  return false
+end
+
 describe("syntax highlighting", function()
   local plugin_root
 
@@ -63,6 +72,10 @@ describe("syntax highlighting", function()
 
     local checked = 0
     local skipped = {}
+    local dbg = zdiff._debug_state()
+    local syntax = dbg.syntax or {}
+    local projected_files = syntax.projected_files or {}
+    local fallback_files = syntax.fallback_files or {}
 
     for _, file in ipairs(fixtures.files) do
       local available, lang = fixtures.lang_available(file.path)
@@ -74,6 +87,14 @@ describe("syntax highlighting", function()
         assert.is_true(
           #marks > 0,
           string.format("expected syntax extmarks on %s probe line %q", file.path, line)
+        )
+        assert.is_true(
+          list_contains(projected_files, file.path),
+          "expected projection syntax for " .. file.path
+        )
+        assert.is_false(
+          list_contains(fallback_files, file.path),
+          "expected no hunk fallback after projection settled for " .. file.path
         )
         checked = checked + 1
       else
