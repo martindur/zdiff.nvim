@@ -25,9 +25,23 @@ describe("syntax module", function()
       "```lua",
       "require('zdiff').setup({ default_expanded = true })",
       "```",
+      "",
+      "```json",
+      "{",
+      '  "enabled": true',
+      "}",
+      "```",
+      "",
+      "```bash",
+      "set -euo pipefail",
+      "echo ready",
+      "```",
     }, "markdown")
 
     assert.is_true(has_group(highlights, "@markup.raw.block"))
     assert.is_true(has_group(highlights, "@function.call"))
+    if syntax.get_lang_from_filetype("json") then
+      assert.is_true(has_group(highlights, "@boolean"))
+    end
   end)
 end)
