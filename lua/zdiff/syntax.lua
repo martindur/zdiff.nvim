@@ -10,12 +10,18 @@ local M = {}
 ---@field line_offset number
 ---@field lines string[]
 ---@field lang string
+---@field col_offsets? table<number, number>
 
 local filetype_aliases = {
   bash = "sh",
   javascript = "js",
   shell = "sh",
   typescript = "ts",
+}
+
+local injection_providers = {
+  markdown = require("zdiff.syntax.markdown"),
+  python = require("zdiff.syntax.python"),
 }
 
 ---@param lang string
@@ -48,79 +54,13 @@ function M.get_lang_from_path(filepath)
   return M.get_lang_from_filetype(ft)
 end
 
----@param info string
----@return string|nil
-local function parse_markdown_fence_info(info)
-  return info:match("^%s*{%.([%w_%-]+)") or info:match("^%s*([%w_%-]+)")
-end
-
----@param line string
----@return string|nil marker, string|nil info
-local function parse_markdown_fence_start(line)
-  local marker, info = line:match("^%s*(```+)%s*(.*)$")
-  if marker then
-    return marker, info or ""
-  end
-
-  marker, info = line:match("^%s*(~~~+)%s*(.*)$")
-  if marker then
-    return marker, info or ""
-  end
-
-  return nil, nil
-end
-
----@param line string
----@param marker string
----@return boolean
-local function is_markdown_fence_end(line, marker)
-  return line:match("^%s*" .. marker) ~= nil
-end
-
----@param code string[]
----@return ZdiffInjection[]
-local function markdown_injections(code)
-  local injections = {}
-  local fence = nil
-
-  for line_idx, line in ipairs(code) do
-    if fence then
-      if is_markdown_fence_end(line, fence.marker) then
-        local ft = parse_markdown_fence_info(fence.info)
-        local lang = ft and M.get_lang_from_filetype(ft) or nil
-        if lang and lang ~= "markdown" and #fence.lines > 0 then
-          table.insert(injections, {
-            lang = lang,
-            lines = fence.lines,
-            line_offset = fence.start_line - 1,
-          })
-        end
-        fence = nil
-      else
-        table.insert(fence.lines, line)
-      end
-    else
-      local marker, info = parse_markdown_fence_start(line)
-      if marker then
-        fence = {
-          marker = marker,
-          info = info,
-          lines = {},
-          start_line = line_idx + 1,
-        }
-      end
-    end
-  end
-
-  return injections
-end
-
 ---@param code string[]
 ---@param lang string
 ---@return ZdiffInjection[]
 local function get_injections(code, lang)
-  if lang == "markdown" then
-    return markdown_injections(code)
+  local provider = injection_providers[lang]
+  if provider then
+    return provider.get_injections(code, M)
   end
   return {}
 end
@@ -178,11 +118,12 @@ end
 local function append_injection_highlights(highlights, injection)
   local injected = M.get_highlights(injection.lines, injection.lang)
   for _, hl in ipairs(injected) do
+    local col_offset = (injection.col_offsets and injection.col_offsets[hl.line]) or 0
     table.insert(highlights, {
       line = injection.line_offset + hl.line,
       hl_group = hl.hl_group,
-      col_start = hl.col_start,
-      col_end = hl.col_end,
+      col_start = col_offset + hl.col_start,
+      col_end = hl.col_end == -1 and -1 or (col_offset + hl.col_end),
     })
   end
 end
