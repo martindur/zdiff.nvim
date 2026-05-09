@@ -1,0 +1,201 @@
+local M = {}
+
+---@class ZdiffSyntaxHighlight
+---@field line number
+---@field hl_group string
+---@field col_start number
+---@field col_end number
+
+---@class ZdiffInjection
+---@field line_offset number
+---@field lines string[]
+---@field lang string
+
+local filetype_aliases = {
+  bash = "sh",
+  javascript = "js",
+  shell = "sh",
+  typescript = "ts",
+}
+
+---@param lang string
+---@return boolean
+function M.has_highlights(lang)
+  if not lang or not pcall(vim.treesitter.language.inspect, lang) then
+    return false
+  end
+  local ok, query = pcall(vim.treesitter.query.get, lang, "highlights")
+  return ok and query ~= nil
+end
+
+---@param ft string
+---@return string|nil
+function M.get_lang_from_filetype(ft)
+  local lang = vim.treesitter.language.get_lang(filetype_aliases[ft] or ft)
+  if lang and M.has_highlights(lang) then
+    return lang
+  end
+  return nil
+end
+
+---@param filepath string
+---@return string|nil
+function M.get_lang_from_path(filepath)
+  local ft = vim.filetype.match({ filename = filepath })
+  if not ft then
+    return nil
+  end
+  return M.get_lang_from_filetype(ft)
+end
+
+---@param info string
+---@return string|nil
+local function parse_markdown_fence_info(info)
+  return info:match("^%s*{%.([%w_%-]+)") or info:match("^%s*([%w_%-]+)")
+end
+
+---@param line string
+---@return string|nil marker, string|nil info
+local function parse_markdown_fence_start(line)
+  local marker, info = line:match("^%s*(```+)%s*(.*)$")
+  if marker then
+    return marker, info or ""
+  end
+
+  marker, info = line:match("^%s*(~~~+)%s*(.*)$")
+  if marker then
+    return marker, info or ""
+  end
+
+  return nil, nil
+end
+
+---@param line string
+---@param marker string
+---@return boolean
+local function is_markdown_fence_end(line, marker)
+  return line:match("^%s*" .. marker) ~= nil
+end
+
+---@param code string[]
+---@return ZdiffInjection[]
+local function markdown_injections(code)
+  local injections = {}
+  local fence = nil
+
+  for line_idx, line in ipairs(code) do
+    if fence then
+      if is_markdown_fence_end(line, fence.marker) then
+        local ft = parse_markdown_fence_info(fence.info)
+        local lang = ft and M.get_lang_from_filetype(ft) or nil
+        if lang and lang ~= "markdown" and #fence.lines > 0 then
+          table.insert(injections, {
+            lang = lang,
+            lines = fence.lines,
+            line_offset = fence.start_line - 1,
+          })
+        end
+        fence = nil
+      else
+        table.insert(fence.lines, line)
+      end
+    else
+      local marker, info = parse_markdown_fence_start(line)
+      if marker then
+        fence = {
+          marker = marker,
+          info = info,
+          lines = {},
+          start_line = line_idx + 1,
+        }
+      end
+    end
+  end
+
+  return injections
+end
+
+---@param code string[]
+---@param lang string
+---@return ZdiffInjection[]
+local function get_injections(code, lang)
+  if lang == "markdown" then
+    return markdown_injections(code)
+  end
+  return {}
+end
+
+---@param code string[]
+---@param lang string
+---@return ZdiffSyntaxHighlight[]
+local function get_treesitter_highlights(code, lang)
+  local source = table.concat(code, "\n")
+  local ok, parser = pcall(vim.treesitter.get_string_parser, source, lang)
+  if not ok or not parser then
+    return {}
+  end
+
+  local trees = parser:parse()
+  if not trees or #trees == 0 then
+    return {}
+  end
+
+  local query_ok, query = pcall(vim.treesitter.query.get, lang, "highlights")
+  if not query_ok or not query then
+    return {}
+  end
+
+  local highlights = {}
+  for id, node, _ in query:iter_captures(trees[1]:root(), source) do
+    local name = query.captures[id]
+    local start_row, start_col, end_row, end_col = node:range()
+    local hl_group = "@" .. name
+
+    if start_row == end_row then
+      table.insert(highlights, {
+        line = start_row + 1,
+        hl_group = hl_group,
+        col_start = start_col,
+        col_end = end_col,
+      })
+    else
+      for row = start_row, end_row do
+        table.insert(highlights, {
+          line = row + 1,
+          hl_group = hl_group,
+          col_start = row == start_row and start_col or 0,
+          col_end = row == end_row and end_col or -1,
+        })
+      end
+    end
+  end
+
+  return highlights
+end
+
+---@param highlights ZdiffSyntaxHighlight[]
+---@param injection ZdiffInjection
+local function append_injection_highlights(highlights, injection)
+  local injected = M.get_highlights(injection.lines, injection.lang)
+  for _, hl in ipairs(injected) do
+    table.insert(highlights, {
+      line = injection.line_offset + hl.line,
+      hl_group = hl.hl_group,
+      col_start = hl.col_start,
+      col_end = hl.col_end,
+    })
+  end
+end
+
+---@param code string[]
+---@param lang string
+---@return ZdiffSyntaxHighlight[]
+function M.get_highlights(code, lang)
+  local highlights = get_treesitter_highlights(code, lang)
+  for _, injection in ipairs(get_injections(code, lang)) do
+    append_injection_highlights(highlights, injection)
+  end
+  return highlights
+end
+
+return M
