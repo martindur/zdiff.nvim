@@ -12,6 +12,16 @@ local function syntax_marks_for_line(buf, ns, row)
   return found
 end
 
+local function marks_have_group(marks, group)
+  for _, mark in ipairs(marks) do
+    local details = mark[4] or {}
+    if details.hl_group == group then
+      return true
+    end
+  end
+  return false
+end
+
 local function is_file_header(line, fixtures_files)
   for _, file in ipairs(fixtures_files) do
     if line:find(file.path, 1, true) then
@@ -134,5 +144,18 @@ describe("syntax highlighting", function()
       "no fixture languages had installed treesitter parsers/queries; skipped: "
         .. table.concat(skipped, ", ")
     )
+
+    local markdown_available = fixtures.lang_available("docs/example.md")
+    local lua_available = fixtures.lang_available("src/example.lua")
+    if markdown_available and lua_available then
+      local row, line = line_with_probe(buf, "docs/example.md", "require('zdiff')")
+      assert.is_not_nil(row, "expected rendered markdown lua fence line")
+
+      local marks = syntax_marks_for_line(buf, ns, row)
+      assert.is_true(
+        marks_have_group(marks, "@function.call"),
+        string.format("expected injected lua captures on markdown fence line %q", line)
+      )
+    end
   end)
 end)
