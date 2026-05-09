@@ -1,4 +1,6 @@
 local M = {}
+local display = require("zdiff.display")
+local winbar = require("zdiff.winbar")
 
 -- State
 ---@class ZdiffFile
@@ -28,10 +30,11 @@ local M = {}
 ---@field win number|nil window handle
 ---@field base_ref string|nil the git ref to diff against (nil = uncommitted changes vs HEAD)
 ---@field line_map table<number, {file_idx: number, hunk_idx: number|nil, line_idx: number|nil, lnum: number|nil}>
+---@field file_header_lines table<number, number>
 ---@field loading_files boolean whether file list refresh is in progress
 ---@field refresh_seq number monotonically increasing refresh generation
 ---@field refresh_timer uv.uv_timer_t|nil timer used for debounced refresh
----@field win_opts table<number, {number: boolean, relativenumber: boolean, signcolumn: string, wrap: boolean, cursorline: boolean}>
+---@field win_opts table<number, {number: boolean, relativenumber: boolean, signcolumn: string, wrap: boolean, cursorline: boolean, winbar: string|nil}>
 ---@field syntax_projection_cache table<string, {old: table<number, table[]>, new: table<number, table[]>}|false>
 ---@field syntax_jobs table<string, integer>
 ---@field syntax_job_seq integer
@@ -43,6 +46,7 @@ local state = {
   win = nil,
   base_ref = nil,
   line_map = {},
+  file_header_lines = {},
   loading_files = false,
   refresh_seq = 0,
   refresh_timer = nil,
@@ -58,6 +62,7 @@ local toggle_expand
 local toggle_mode
 local show_help
 local render
+local update_winbar
 
 -- Configuration
 ---@class ZdiffConfig
@@ -134,6 +139,7 @@ local function save_window_opts(win)
     signcolumn = vim.wo[win].signcolumn,
     wrap = vim.wo[win].wrap,
     cursorline = vim.wo[win].cursorline,
+    winbar = vim.wo[win].winbar,
   }
 end
 
@@ -161,13 +167,27 @@ local function restore_window_opts(win)
   vim.wo[win].signcolumn = opts.signcolumn
   vim.wo[win].wrap = opts.wrap
   vim.wo[win].cursorline = opts.cursorline
+  vim.wo[win].winbar = opts.winbar or ""
   state.win_opts[win] = nil
+end
+
+---@param win? number
+update_winbar = function(win)
+  winbar.update({
+    buf = state.buf,
+    win = state.win,
+    files = state.files,
+    line_map = state.line_map,
+    file_header_lines = state.file_header_lines,
+    icons = M.config.icons,
+  }, win)
 end
 
 local uv = vim.uv or vim.loop
 local ns_diff = vim.api.nvim_create_namespace("zdiff")
 local ns_syntax = vim.api.nvim_create_namespace("zdiff_syntax")
 local ns_markers = vim.api.nvim_create_namespace("zdiff_markers")
+local augroup = vim.api.nvim_create_augroup("zdiff", { clear = false })
 
 ---@param argv string[]
 ---@param callback fun(code: number, lines: string[])
@@ -467,13 +487,7 @@ end
 ---@param status string
 ---@return string
 local function get_status_icon(status)
-  if status == "A" or status == "?" then
-    return M.config.icons.added
-  elseif status == "D" then
-    return M.config.icons.deleted
-  else
-    return M.config.icons.modified
-  end
+  return display.get_status_icon(status, M.config.icons)
 end
 
 ---Get highlight group for diff line type
@@ -777,6 +791,7 @@ render = function()
     normalize_enum(syntax_cfg.mode, { projection = true, hunk = true }, "projection")
   local markers = {} -- {line_idx, text, hl_group}
   state.line_map = {}
+  state.file_header_lines = {}
 
   -- Header
   local mode_text
@@ -814,6 +829,7 @@ render = function()
 
       -- Map this line to the file
       state.line_map[#lines] = { file_idx = file_idx }
+      state.file_header_lines[file_idx] = #lines
 
       -- Calculate positions for highlighting
       local line_text = lines[#lines]
@@ -1004,6 +1020,7 @@ render = function()
   end
 
   vim.bo[state.buf].modifiable = false
+  update_winbar()
 
   -- Queue syntax projection jobs after first paint for responsive rendering.
   for _, req in ipairs(syntax_requests) do
@@ -1305,6 +1322,7 @@ local function refresh()
       local line_count = vim.api.nvim_buf_line_count(state.buf)
       cursor_line = math.min(cursor_line, line_count)
       vim.api.nvim_win_set_cursor(state.win, { cursor_line, 0 })
+      update_winbar(state.win)
     end
   end)
 end
@@ -1356,6 +1374,7 @@ local function close()
     state.refresh_timer:close()
     state.refresh_timer = nil
   end
+  vim.api.nvim_clear_autocmds({ group = augroup })
   for win, _ in pairs(state.win_opts) do
     restore_window_opts(win)
   end
@@ -1398,6 +1417,9 @@ function M.open(base_ref)
       -- Same ref, just switch to the buffer
       state.win = vim.api.nvim_get_current_win()
       vim.api.nvim_win_set_buf(state.win, state.buf)
+      save_window_opts(state.win)
+      apply_zdiff_window_opts(state.win)
+      update_winbar(state.win)
       return
     else
       -- Different ref, close and reopen
@@ -1414,6 +1436,7 @@ function M.open(base_ref)
   vim.bo[state.buf].swapfile = false
   vim.api.nvim_buf_set_name(state.buf, "zdiff")
   vim.bo[state.buf].filetype = "zdiff"
+  vim.api.nvim_clear_autocmds({ group = augroup })
 
   -- Open in current window
   state.win = vim.api.nvim_get_current_win()
@@ -1449,11 +1472,13 @@ function M.open(base_ref)
 
   -- Auto-refresh when returning to zdiff buffer
   vim.api.nvim_create_autocmd("BufEnter", {
+    group = augroup,
     buffer = state.buf,
     callback = function()
       state.win = vim.api.nvim_get_current_win()
       save_window_opts(state.win)
       apply_zdiff_window_opts(state.win)
+      update_winbar(state.win)
       if state.loading_files then
         return
       end
@@ -1462,10 +1487,28 @@ function M.open(base_ref)
   })
 
   vim.api.nvim_create_autocmd("BufLeave", {
+    group = augroup,
     buffer = state.buf,
     callback = function()
       local win = vim.api.nvim_get_current_win()
       restore_window_opts(win)
+    end,
+  })
+
+  vim.api.nvim_create_autocmd("CursorMoved", {
+    group = augroup,
+    buffer = state.buf,
+    callback = function()
+      update_winbar(vim.api.nvim_get_current_win())
+    end,
+  })
+
+  vim.api.nvim_create_autocmd("WinScrolled", {
+    group = augroup,
+    callback = function()
+      local event = vim.v.event or {}
+      local win = tonumber(event.winid) or state.win
+      update_winbar(win)
     end,
   })
 
