@@ -44,4 +44,24 @@ describe("syntax module", function()
       assert.is_true(has_group(highlights, "@boolean"))
     end
   end)
+
+  it("adds injected sql highlights for python query strings", function()
+    if
+      not syntax.get_lang_from_filetype("python")
+      or not syntax.get_lang_from_filetype("sql")
+    then
+      pending("python or sql treesitter highlights are not available")
+      return
+    end
+
+    local highlights = syntax.get_highlights({
+      'USER_QUERY = """',
+      "SELECT id, COALESCE(display_name, name) AS label",
+      "FROM users",
+      "WHERE active = TRUE",
+      '"""',
+    }, "python")
+
+    assert.is_true(has_group(highlights, "@keyword"))
+  end)
 end)
