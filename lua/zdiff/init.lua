@@ -38,6 +38,7 @@ local winbar = require("zdiff.winbar")
 ---@field syntax_projection_cache table<string, {old: table<number, table[]>, new: table<number, table[]>}|false>
 ---@field syntax_jobs table<string, integer>
 ---@field syntax_job_seq integer
+---@field syntax_debug {projected_files: string[], fallback_files: string[], skipped_files: table<string, string>}
 
 ---@type ZdiffState
 local state = {
@@ -54,6 +55,11 @@ local state = {
   syntax_projection_cache = {},
   syntax_jobs = {},
   syntax_job_seq = 0,
+  syntax_debug = {
+    projected_files = {},
+    fallback_files = {},
+    skipped_files = {},
+  },
 }
 
 -- Forward declarations
@@ -792,6 +798,11 @@ render = function()
   local markers = {} -- {line_idx, text, hl_group}
   state.line_map = {}
   state.file_header_lines = {}
+  state.syntax_debug = {
+    projected_files = {},
+    fallback_files = {},
+    skipped_files = {},
+  }
 
   -- Header
   local mode_text
@@ -972,6 +983,16 @@ render = function()
               end
             end
           end
+
+          if used_projection then
+            table.insert(state.syntax_debug.projected_files, file.path)
+          elseif #code_lines > 0 then
+            table.insert(state.syntax_debug.fallback_files, file.path)
+          else
+            state.syntax_debug.skipped_files[file.path] = "no diff lines"
+          end
+        else
+          state.syntax_debug.skipped_files[file.path] = "no treesitter language"
         end
       end
     end
@@ -1534,6 +1555,7 @@ M._debug_state = function()
     loading_files = state.loading_files,
     pending_syntax_jobs = vim.tbl_count(state.syntax_jobs),
     syntax_cache_entries = vim.tbl_count(state.syntax_projection_cache),
+    syntax = vim.deepcopy(state.syntax_debug),
   }
 end
 

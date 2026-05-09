@@ -218,6 +218,13 @@ Stress test (async refresh + repeated open/close memory baseline check + open-ti
 make stress-test
 ```
 
+Open a generated fixture repo with many file types and expanded diffs for manual syntax highlighting checks. The default target uses your normal Neovim config and installed parsers, while the clean target uses `tests/minimal_init.lua`:
+
+```bash
+make syntax-gallery
+make syntax-gallery-clean
+```
+
 ## License
 
 MIT
