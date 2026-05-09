@@ -12,13 +12,40 @@ local function syntax_marks_for_line(buf, ns, row)
   return found
 end
 
-local function line_with_probe(buf, probe)
+local function is_file_header(line, fixtures_files)
+  for _, file in ipairs(fixtures_files) do
+    if line:find(file.path, 1, true) then
+      return true
+    end
+  end
+  return false
+end
+
+local function line_with_probe(buf, path, probe)
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local start_idx = nil
+
   for idx, line in ipairs(lines) do
+    if line:find(path, 1, true) then
+      start_idx = idx + 1
+      break
+    end
+  end
+
+  if not start_idx then
+    return nil, nil
+  end
+
+  for idx = start_idx, #lines do
+    local line = lines[idx]
+    if is_file_header(line, fixtures.files) then
+      return nil, nil
+    end
     if line:find(probe, 1, true) then
       return idx - 1, line
     end
   end
+
   return nil, nil
 end
 
@@ -80,7 +107,7 @@ describe("syntax highlighting", function()
     for _, file in ipairs(fixtures.files) do
       local available, lang = fixtures.lang_available(file.path)
       if available then
-        local row, line = line_with_probe(buf, file.probe)
+        local row, line = line_with_probe(buf, file.path, file.probe)
         assert.is_not_nil(row, "expected rendered probe for " .. file.path)
 
         local marks = syntax_marks_for_line(buf, ns, row)

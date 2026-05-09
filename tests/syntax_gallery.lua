@@ -18,7 +18,7 @@ function M.open()
   local zdiff = require("zdiff")
 
   zdiff.setup({
-    default_expanded = true,
+    default_expanded = false,
     syntax = {
       mode = "projection",
       max_lines = 0,
