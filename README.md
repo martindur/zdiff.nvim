@@ -162,6 +162,27 @@ require("zdiff").setup({
 })
 ```
 
+### zdiff.lens
+
+`zdiff.lens` is an optional source-buffer overlay module. It highlights git
+diffs in normal file buffers without changing editing, undo, or `:w` behavior.
+Deleted lines are shown as virtual lines; no hunk headers are rendered.
+
+```lua
+require("zdiff.lens").setup({
+  auto_attach = true,
+  virtual_deleted = true,
+})
+```
+
+You can also attach it manually:
+
+```lua
+require("zdiff.lens").attach()
+require("zdiff.lens").detach()
+require("zdiff.lens").toggle()
+```
+
 ### Examples
 
 #### Set default branch to develop

@@ -1,5 +1,6 @@
 local M = {}
 local display = require("zdiff.display")
+local git = require("zdiff.git")
 local syntax = require("zdiff.syntax")
 local winbar = require("zdiff.winbar")
 
@@ -338,77 +339,6 @@ local function get_diff_stats_async(base_ref, done)
   end)
 end
 
----Parse a unified diff hunk header
----@param header string the @@ line
----@return number old_start, number old_count, number new_start, number new_count
-local function parse_hunk_header(header)
-  local old_start, old_count, new_start, new_count =
-    header:match("^@@ %-(%d+),?(%d*) %+(%d+),?(%d*) @@")
-  return tonumber(old_start) or 0,
-    tonumber(old_count) or 1,
-    tonumber(new_start) or 0,
-    tonumber(new_count) or 1
-end
-
----Parse diff output for a single file into hunks
----@param diff_lines string[]
----@return ZdiffHunk[]
-local function parse_diff_hunks(diff_lines)
-  local hunks = {}
-  local current_hunk = nil
-  local old_lnum, new_lnum = 0, 0
-
-  for _, line in ipairs(diff_lines) do
-    if line:match("^@@") then
-      -- New hunk
-      if current_hunk then
-        table.insert(hunks, current_hunk)
-      end
-      local old_start, old_count, new_start, new_count = parse_hunk_header(line)
-      old_lnum = old_start
-      new_lnum = new_start
-      current_hunk = {
-        old_start = old_start,
-        old_count = old_count,
-        new_start = new_start,
-        new_count = new_count,
-        lines = {},
-      }
-    elseif current_hunk then
-      local diff_line = {
-        text = line:sub(2), -- Remove the +/- prefix
-        type = "context",
-        new_lnum = nil,
-        old_lnum = nil,
-      }
-
-      if line:match("^%+") then
-        diff_line.type = "add"
-        diff_line.new_lnum = new_lnum
-        new_lnum = new_lnum + 1
-      elseif line:match("^%-") then
-        diff_line.type = "del"
-        diff_line.old_lnum = old_lnum
-        old_lnum = old_lnum + 1
-      elseif line:match("^ ") or line == "" then
-        diff_line.type = "context"
-        diff_line.new_lnum = new_lnum
-        diff_line.old_lnum = old_lnum
-        new_lnum = new_lnum + 1
-        old_lnum = old_lnum + 1
-      end
-
-      table.insert(current_hunk.lines, diff_line)
-    end
-  end
-
-  if current_hunk then
-    table.insert(hunks, current_hunk)
-  end
-
-  return hunks
-end
-
 ---Get diff hunks for a specific file
 ---@param filepath string
 ---@param base_ref string|nil git ref to diff against, or nil for uncommitted
@@ -446,23 +376,12 @@ local function get_file_diff(filepath, base_ref, status)
     }
   end
 
-  local cmd
-  if base_ref then
-    cmd = string.format(
-      "git diff %s...HEAD -- %s",
-      vim.fn.shellescape(base_ref),
-      vim.fn.shellescape(filepath)
-    )
-  else
-    cmd = string.format("git diff HEAD -- %s", vim.fn.shellescape(filepath))
-  end
-
-  local result = vim.fn.systemlist(cmd)
-  if vim.v.shell_error ~= 0 then
+  local git_root = get_git_root()
+  if not git_root then
     return {}
   end
 
-  return parse_diff_hunks(result)
+  return git.file_hunks(git_root, filepath, base_ref)
 end
 
 ---@param base_ref string|nil git ref to diff against, or nil for uncommitted

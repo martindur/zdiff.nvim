@@ -147,6 +147,25 @@ icons ~
     Icons used in the UI for collapsed/expanded states and file status.
 
 ==============================================================================
+ZDIFF.LENS                                                   *zdiff-lens*
+
+`zdiff.lens` is an optional source-buffer overlay module. It highlights git
+diffs in normal file buffers without changing editing, undo, or `:w`
+behavior. Deleted lines are shown as virtual lines; no hunk headers are
+rendered.
+
+Example: >lua
+    require("zdiff.lens").setup({
+      auto_attach = true,
+      virtual_deleted = true,
+    })
+<
+Manual usage: >lua
+    require("zdiff.lens").attach()
+    require("zdiff.lens").detach()
+    require("zdiff.lens").toggle()
+<
+==============================================================================
 6. FUNCTIONS                                                 *zdiff-functions*
 
                                                                *zdiff.setup()*
