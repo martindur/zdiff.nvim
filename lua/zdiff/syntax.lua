@@ -13,10 +13,10 @@ local M = {}
 ---@field col_offsets? table<number, number>
 
 local filetype_aliases = {
-  bash = "sh",
-  javascript = "js",
-  shell = "sh",
-  typescript = "ts",
+  bash = { "sh" },
+  javascriptreact = { "javascript" },
+  shell = { "sh" },
+  typescriptreact = { "tsx", "typescript" },
 }
 
 local injection_providers = {
@@ -30,6 +30,9 @@ function M.has_highlights(lang)
   if not lang or not pcall(vim.treesitter.language.inspect, lang) then
     return false
   end
+  if not pcall(vim.treesitter.get_string_parser, "probe\n", lang) then
+    return false
+  end
   local ok, query = pcall(vim.treesitter.query.get, lang, "highlights")
   return ok and query ~= nil
 end
@@ -37,9 +40,18 @@ end
 ---@param ft string
 ---@return string|nil
 function M.get_lang_from_filetype(ft)
-  local lang = vim.treesitter.language.get_lang(filetype_aliases[ft] or ft)
-  if lang and M.has_highlights(lang) then
-    return lang
+  local candidates = { ft }
+  vim.list_extend(candidates, filetype_aliases[ft] or {})
+
+  local seen = {}
+  for _, candidate in ipairs(candidates) do
+    if not seen[candidate] then
+      seen[candidate] = true
+      local lang = vim.treesitter.language.get_lang(candidate) or candidate
+      if lang and M.has_highlights(lang) then
+        return lang
+      end
+    end
   end
   return nil
 end

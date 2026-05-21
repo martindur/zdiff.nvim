@@ -636,7 +636,7 @@ function M.lang_available(path)
     return false, nil
   end
 
-  local lang = vim.treesitter.language.get_lang(ft)
+  local lang = require("zdiff.syntax").get_lang_from_filetype(ft)
   if not lang then
     return false, nil
   end
