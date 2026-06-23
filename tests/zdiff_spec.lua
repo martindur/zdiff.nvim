@@ -45,6 +45,16 @@ local function get_normal_keymap(buf, lhs)
   return nil
 end
 
+local function find_line(text)
+  local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+  for i, line in ipairs(lines) do
+    if line:find(text, 1, true) then
+      return i
+    end
+  end
+  return nil
+end
+
 describe("zdiff", function()
   local plugin_root
 
@@ -275,6 +285,54 @@ describe("zdiff", function()
       local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
       assert.is_truthy(content:find("Error loading changes", 1, true))
       assert.is_nil(content:find("No changes found", 1, true))
+    end)
+
+    it("should not open deleted files from the worktree", function()
+      local repo = create_changed_repo("deleted.txt", "gone\n", "gone\n")
+      run_git(repo, { "rm", "--", "deleted.txt" })
+
+      vim.cmd("cd " .. vim.fn.fnameescape(repo))
+      zdiff.open()
+      wait_for_loaded()
+
+      local goto_keymap = get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>")
+      vim.api.nvim_win_set_cursor(0, { assert(find_line("deleted.txt")), 0 })
+
+      local notifications = {}
+      local old_notify = vim.notify
+      vim.notify = function(msg)
+        table.insert(notifications, msg)
+      end
+      local ok, err = pcall(goto_keymap.callback)
+      vim.notify = old_notify
+
+      assert.is_true(ok, err)
+      assert.equals("zdiff", vim.bo[vim.api.nvim_get_current_buf()].filetype)
+      assert.is_truthy(notifications[1]:find("Cannot open deleted file", 1, true))
+    end)
+
+    it("should not navigate deleted lines to the current file", function()
+      local repo = create_changed_repo("a.txt", "one\ntwo\nthree\n", "one\nthree\n")
+      zdiff.config.default_expanded = true
+
+      vim.cmd("cd " .. vim.fn.fnameescape(repo))
+      zdiff.open()
+      wait_for_loaded()
+
+      local goto_keymap = get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>")
+      vim.api.nvim_win_set_cursor(0, { assert(find_line("two")), 0 })
+
+      local notifications = {}
+      local old_notify = vim.notify
+      vim.notify = function(msg)
+        table.insert(notifications, msg)
+      end
+      local ok, err = pcall(goto_keymap.callback)
+      vim.notify = old_notify
+
+      assert.is_true(ok, err)
+      assert.equals("zdiff", vim.bo[vim.api.nvim_get_current_buf()].filetype)
+      assert.is_truthy(notifications[1]:find("Cannot open deleted line", 1, true))
     end)
   end)
 end)

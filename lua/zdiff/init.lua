@@ -862,11 +862,28 @@ goto_source = function()
     return
   end
 
-  local filepath = state.root and (state.root .. "/" .. file.path) or file.path
+  if file.status == "D" then
+    notify("Cannot open deleted file: " .. file.path, vim.log.levels.WARN)
+    return
+  end
+
+  local diff_line = nil
+  if mapping.hunk_idx and mapping.line_idx and file.hunks[mapping.hunk_idx] then
+    diff_line = file.hunks[mapping.hunk_idx].lines[mapping.line_idx]
+    if diff_line and diff_line.type == "del" then
+      notify("Cannot open deleted line: " .. file.path, vim.log.levels.WARN)
+      return
+    end
+  end
+
+  local rel_path = file.new_path or file.path
+  local filepath = state.root and (state.root .. "/" .. rel_path) or rel_path
 
   -- Determine target line
   local target_line = 1
-  if mapping.lnum then
+  if diff_line and diff_line.new_lnum then
+    target_line = diff_line.new_lnum
+  elseif mapping.lnum then
     target_line = mapping.lnum
   elseif mapping.hunk_idx and file.hunks[mapping.hunk_idx] then
     target_line = file.hunks[mapping.hunk_idx].new_start
