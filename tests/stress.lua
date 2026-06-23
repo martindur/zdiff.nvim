@@ -62,7 +62,9 @@ local function wait_for_syntax_idle(timeout_ms)
   local zdiff = require("zdiff")
   local ok = vim.wait(timeout_ms, function()
     local dbg = zdiff._debug_state and zdiff._debug_state() or {}
-    return (dbg.pending_syntax_jobs or 0) == 0
+    return not dbg.pending_render
+      and (dbg.pending_hunk_jobs or 0) == 0
+      and (dbg.pending_syntax_jobs or 0) == 0
   end, 50)
   if not ok then
     error("timeout waiting for zdiff syntax jobs to complete")

@@ -37,9 +37,13 @@ end
 ---@param ft string
 ---@return string|nil
 function M.get_lang_from_filetype(ft)
-  local lang = vim.treesitter.language.get_lang(filetype_aliases[ft] or ft)
-  if lang and M.has_highlights(lang) then
-    return lang
+  for _, candidate in ipairs({ ft, filetype_aliases[ft] }) do
+    if candidate then
+      local lang = vim.treesitter.language.get_lang(candidate)
+      if lang and M.has_highlights(lang) then
+        return lang
+      end
+    end
   end
   return nil
 end

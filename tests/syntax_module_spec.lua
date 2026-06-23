@@ -10,6 +10,16 @@ local function has_group(highlights, group)
 end
 
 describe("syntax module", function()
+  it("prefers native tree-sitter languages before aliases", function()
+    local native = vim.treesitter.language.get_lang("javascript")
+    if not native or not syntax.has_highlights(native) then
+      pending("javascript treesitter highlights are not available")
+      return
+    end
+
+    assert.equals(native, syntax.get_lang_from_filetype("javascript"))
+  end)
+
   it("adds injected highlights for markdown fenced code blocks", function()
     if
       not syntax.get_lang_from_filetype("markdown")

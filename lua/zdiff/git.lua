@@ -378,8 +378,8 @@ end
 ---@param root string
 ---@param base_ref string|nil
 ---@param file ZdiffGitFile
----@return {ok: boolean, data?: string[], error?: string}
-function M.file_diff_lines(root, base_ref, file)
+---@return string[]
+local function file_diff_args(root, base_ref, file)
   local args = { "diff" }
   vim.list_extend(args, diff_target(root, base_ref))
   table.insert(args, "--")
@@ -390,8 +390,29 @@ function M.file_diff_lines(root, base_ref, file)
       seen[path] = true
     end
   end
+  return args
+end
 
-  return M.run_lines(root, args)
+---@param root string
+---@param base_ref string|nil
+---@param file ZdiffGitFile
+---@return {ok: boolean, data?: string[], error?: string}
+function M.file_diff_lines(root, base_ref, file)
+  return M.run_lines(root, file_diff_args(root, base_ref, file))
+end
+
+---@param root string
+---@param base_ref string|nil
+---@param file ZdiffGitFile
+---@param done fun(result: {ok: boolean, data?: string[], error?: string})
+function M.file_diff_lines_async(root, base_ref, file, done)
+  M.run_async(root, file_diff_args(root, base_ref, file), function(result)
+    if not result.ok then
+      done({ ok = false, error = result.error })
+      return
+    end
+    done({ ok = true, data = M.split_lines(result.stdout) })
+  end)
 end
 
 ---@param root string

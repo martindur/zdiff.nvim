@@ -1,4 +1,5 @@
 local zdiff = require("zdiff")
+local git = require("zdiff.git")
 
 local function run_git(repo, args)
   local argv = { "git", "-C", repo }
@@ -31,7 +32,10 @@ end
 
 local function wait_for_loaded()
   local ok = vim.wait(5000, function()
-    return not zdiff._debug_state().loading_files
+    local dbg = zdiff._debug_state()
+    return not dbg.loading_files
+      and not dbg.pending_render
+      and (dbg.pending_hunk_jobs or 0) == 0
   end, 50)
   assert.is_true(ok, "timed out waiting for zdiff to load")
 end
@@ -294,6 +298,35 @@ describe("zdiff", function()
       local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
       assert.is_truthy(content:find("Error loading changes", 1, true))
       assert.is_nil(content:find("No changes found", 1, true))
+    end)
+
+    it("should not reload expanded files with no hunks", function()
+      local repo = create_changed_repo("old.txt", "same\n", "same\n")
+      run_git(repo, { "mv", "old.txt", "new.txt" })
+      zdiff.config.default_expanded = true
+
+      local calls = 0
+      local original = git.file_diff_lines_async
+      git.file_diff_lines_async = function(...)
+        calls = calls + 1
+        return original(...)
+      end
+
+      local ok, err = pcall(function()
+        vim.cmd("cd " .. vim.fn.fnameescape(repo))
+        zdiff.open()
+        wait_for_loaded()
+
+        local toggle_keymap = get_normal_keymap(vim.api.nvim_get_current_buf(), "<Tab>")
+        vim.api.nvim_win_set_cursor(0, { assert(find_line("old.txt -> new.txt")), 0 })
+        toggle_keymap.callback()
+        toggle_keymap.callback()
+        wait_for_loaded()
+      end)
+      git.file_diff_lines_async = original
+
+      assert.is_true(ok, err)
+      assert.equals(1, calls)
     end)
 
     it("should skip disabled and invalid keymaps", function()

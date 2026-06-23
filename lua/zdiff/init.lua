@@ -15,6 +15,9 @@ local winbar = require("zdiff.winbar")
 ---@field deletions number lines deleted
 ---@field expanded boolean whether file is expanded
 ---@field hunks ZdiffHunk[] parsed diff hunks
+---@field hunk_status "unloaded"|"loading"|"loaded"|"failed"
+---@field hunk_error string|nil
+---@field hunk_job integer|nil
 
 ---@class ZdiffHunk
 ---@field old_start number starting line in old file
@@ -41,7 +44,10 @@ local winbar = require("zdiff.winbar")
 ---@field loading_files boolean whether file list refresh is in progress
 ---@field refresh_seq number monotonically increasing refresh generation
 ---@field refresh_timer uv.uv_timer_t|nil timer used for debounced refresh
+---@field render_timer uv.uv_timer_t|nil timer used for debounced renders
+---@field render_pending boolean whether a debounced render is queued
 ---@field win_opts table<number, {number: boolean, relativenumber: boolean, signcolumn: string, wrap: boolean, cursorline: boolean, winbar: string|nil}>
+---@field hunk_job_seq integer
 ---@field syntax_projection_cache table<string, {old: table<number, table[]>, new: table<number, table[]>}|false>
 ---@field syntax_jobs table<string, integer>
 ---@field syntax_job_seq integer
@@ -60,7 +66,10 @@ local state = {
   loading_files = false,
   refresh_seq = 0,
   refresh_timer = nil,
+  render_timer = nil,
+  render_pending = false,
   win_opts = {},
+  hunk_job_seq = 0,
   syntax_projection_cache = {},
   syntax_jobs = {},
   syntax_job_seq = 0,
@@ -220,6 +229,29 @@ local ns_syntax = vim.api.nvim_create_namespace("zdiff_syntax")
 local ns_markers = vim.api.nvim_create_namespace("zdiff_markers")
 local augroup = vim.api.nvim_create_augroup("zdiff", { clear = false })
 
+local function render_debounced()
+  if state.render_pending then
+    return
+  end
+
+  state.render_pending = true
+  local timer = uv.new_timer()
+  state.render_timer = timer
+  timer:start(10, 0, function()
+    timer:stop()
+    timer:close()
+    if state.render_timer == timer then
+      state.render_timer = nil
+    end
+    vim.schedule(function()
+      if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
+        render()
+      end
+      state.render_pending = false
+    end)
+  end)
+end
+
 ---Parse a unified diff hunk header
 ---@param header string the @@ line
 ---@return number old_start, number old_count, number new_start, number new_count
@@ -291,32 +323,30 @@ local function parse_diff_hunks(diff_lines)
   return hunks
 end
 
----Get diff hunks for a specific file
 ---@param file ZdiffFile
----@param base_ref string|nil git ref to diff against, or nil for uncommitted
----@return ZdiffHunk[]
-local function get_file_diff(file, base_ref)
-  -- For untracked files, show entire file as additions
-  if file.status == "?" then
-    if not state.root then
-      return {}
-    end
+---@return {ok: boolean, data?: ZdiffHunk[], error?: string}
+local function get_untracked_file_hunks(file)
+  if not state.root then
+    return { ok = false, error = "no git repository root for current session" }
+  end
 
-    local result = git.read_worktree_lines(state.root, file.path)
-    if not result.ok then
-      return {}
-    end
+  local result = git.read_worktree_lines(state.root, file.path)
+  if not result.ok then
+    return { ok = false, error = result.error }
+  end
 
-    local lines = {}
-    for _, line in ipairs(result.data or {}) do
-      table.insert(lines, { type = "add", text = line, new_lnum = #lines + 1 })
-    end
+  local lines = {}
+  for _, line in ipairs(result.data or {}) do
+    table.insert(lines, { type = "add", text = line, new_lnum = #lines + 1 })
+  end
 
-    if #lines == 0 then
-      return {}
-    end
+  if #lines == 0 then
+    return { ok = true, data = {} }
+  end
 
-    return {
+  return {
+    ok = true,
+    data = {
       {
         header = string.format("@@ -0,0 +1,%d @@ (new file)", #lines),
         old_start = 0,
@@ -325,19 +355,75 @@ local function get_file_diff(file, base_ref)
         new_count = #lines,
         lines = lines,
       },
-    }
+    },
+  }
+end
+
+---Load diff hunks for a specific file
+---@param file ZdiffFile
+---@param base_ref string|nil git ref to diff against, or nil for uncommitted
+---@param done fun(result: {ok: boolean, data?: ZdiffHunk[], error?: string})
+local function load_file_hunks_async(file, base_ref, done)
+  if file.status == "?" then
+    local result = get_untracked_file_hunks(file)
+    vim.schedule(function()
+      done(result)
+    end)
+    return
   end
 
   if not state.root then
-    return {}
+    vim.schedule(function()
+      done({ ok = false, error = "no git repository root for current session" })
+    end)
+    return
   end
 
-  local result = git.file_diff_lines(state.root, base_ref, file)
-  if not result.ok then
-    return {}
+  git.file_diff_lines_async(state.root, base_ref, file, function(result)
+    if not result.ok then
+      done({ ok = false, error = result.error })
+      return
+    end
+    done({ ok = true, data = parse_diff_hunks(result.data or {}) })
+  end)
+end
+
+---@param file_idx number
+---@param file ZdiffFile
+local function queue_file_hunks(file_idx, file)
+  if file.hunk_status == "loading" or file.hunk_status == "loaded" then
+    return
   end
 
-  return parse_diff_hunks(result.data or {})
+  state.hunk_job_seq = state.hunk_job_seq + 1
+  local token = state.hunk_job_seq
+  local refresh_seq = state.refresh_seq
+  file.hunk_status = "loading"
+  file.hunk_error = nil
+  file.hunk_job = token
+
+  load_file_hunks_async(file, state.base_ref, function(result)
+    if refresh_seq ~= state.refresh_seq then
+      return
+    end
+
+    local current = state.files[file_idx]
+    if not current or current.hunk_job ~= token then
+      return
+    end
+
+    current.hunk_job = nil
+    if result.ok then
+      current.hunks = result.data or {}
+      current.hunk_status = "loaded"
+      current.hunk_error = nil
+    else
+      current.hunks = {}
+      current.hunk_status = "failed"
+      current.hunk_error = render_error(result.error)
+    end
+    render_debounced()
+  end)
 end
 
 ---Get the status icon for a file
@@ -545,7 +631,7 @@ local function queue_projection_cache(key, file, lang)
     end
     state.syntax_projection_cache[key] = cache or false
     if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
-      render()
+      render_debounced()
     end
   end
 
@@ -640,141 +726,156 @@ render = function()
 
       -- Show hunks only if expanded
       if file.expanded then
-        -- Load hunks if not already loaded
-        if #file.hunks == 0 then
-          file.hunks = get_file_diff(file, state.base_ref)
+        if file.hunk_status == "unloaded" then
+          queue_file_hunks(file_idx, file)
         end
 
-        -- Get language for syntax highlighting
-        local lang = syntax.get_lang_from_path(file.path)
-
-        -- Collect diff-line mappings for syntax projection and hunk fallback.
-        local code_lines = {}
-        local code_line_mapping = {} -- maps code line index to {buffer_line, prefix_len}
-        local projection_lines = {}
-
-        for hunk_idx, hunk in ipairs(file.hunks) do
-          -- Hunk header
-          local hunk_header = string.format(
-            "  @@ -%d,%d +%d,%d @@",
-            hunk.old_start,
-            hunk.old_count,
-            hunk.new_start,
-            hunk.new_count
-          )
-          -- Keep git metadata out of buffer text; render as virtual text instead.
-          table.insert(lines, "  ")
-          state.line_map[#lines] = { file_idx = file_idx, hunk_idx = hunk_idx }
+        if file.hunk_status == "loading" then
+          table.insert(lines, "  Loading diff...")
+          state.line_map[#lines] = { file_idx = file_idx }
           table.insert(highlights, { #lines, "Comment", 0, -1 })
-          table.insert(markers, { #lines, hunk_header, "Comment" })
+        elseif file.hunk_status == "failed" then
+          table.insert(lines, "  Error loading diff: " .. (file.hunk_error or "unknown"))
+          state.line_map[#lines] = { file_idx = file_idx }
+          table.insert(highlights, { #lines, "Comment", 0, -1 })
+        elseif file.hunk_status == "loaded" then
+          -- Get language for syntax highlighting
+          local lang = syntax.get_lang_from_path(file.path)
 
-          -- Diff lines
-          for line_idx, diff_line in ipairs(hunk.lines) do
-            local prefix = "  "
-            local display_line = prefix .. diff_line.text
-            table.insert(lines, display_line)
+          -- Collect diff-line mappings for syntax projection and hunk fallback.
+          local code_lines = {}
+          local code_line_mapping = {} -- maps code line index to {buffer_line, prefix_len}
+          local projection_lines = {}
 
-            -- Map this line
-            state.line_map[#lines] = {
-              file_idx = file_idx,
-              hunk_idx = hunk_idx,
-              line_idx = line_idx,
-              lnum = diff_line.new_lnum or diff_line.old_lnum,
-            }
-
-            -- Add diff background highlight
-            table.insert(
-              highlights,
-              { #lines, get_line_highlight(diff_line.type), 0, -1 }
+          for hunk_idx, hunk in ipairs(file.hunks) do
+            -- Hunk header
+            local hunk_header = string.format(
+              "  @@ -%d,%d +%d,%d @@",
+              hunk.old_start,
+              hunk.old_count,
+              hunk.new_start,
+              hunk.new_count
             )
+            -- Keep git metadata out of buffer text; render as virtual text instead.
+            table.insert(lines, "  ")
+            state.line_map[#lines] = { file_idx = file_idx, hunk_idx = hunk_idx }
+            table.insert(highlights, { #lines, "Comment", 0, -1 })
+            table.insert(markers, { #lines, hunk_header, "Comment" })
 
-            -- Render +/- markers as virtual text so they are not part of buffer content
-            if diff_line.type == "add" then
-              table.insert(markers, { #lines, " " .. M.config.icons.added, "Comment" })
-            elseif diff_line.type == "del" then
-              table.insert(markers, { #lines, " " .. M.config.icons.deleted, "Comment" })
-            end
+            -- Diff lines
+            for line_idx, diff_line in ipairs(hunk.lines) do
+              local prefix = "  "
+              local display_line = prefix .. diff_line.text
+              table.insert(lines, display_line)
 
-            -- Track for syntax highlighting
-            if lang then
-              local source_side = diff_line.type == "del" and "old" or "new"
-              table.insert(projection_lines, {
-                buffer_line = #lines,
-                prefix_len = #prefix,
-                source_side = source_side,
-                old_lnum = diff_line.old_lnum,
-                new_lnum = diff_line.new_lnum,
-              })
+              -- Map this line
+              state.line_map[#lines] = {
+                file_idx = file_idx,
+                hunk_idx = hunk_idx,
+                line_idx = line_idx,
+                lnum = diff_line.new_lnum or diff_line.old_lnum,
+              }
 
-              table.insert(code_lines, diff_line.text)
+              -- Add diff background highlight
               table.insert(
-                code_line_mapping,
-                { buffer_line = #lines, prefix_len = #prefix }
+                highlights,
+                { #lines, get_line_highlight(diff_line.type), 0, -1 }
               )
+
+              -- Render +/- markers as virtual text so they are not part of buffer content
+              if diff_line.type == "add" then
+                table.insert(markers, { #lines, " " .. M.config.icons.added, "Comment" })
+              elseif diff_line.type == "del" then
+                table.insert(
+                  markers,
+                  { #lines, " " .. M.config.icons.deleted, "Comment" }
+                )
+              end
+
+              -- Track for syntax highlighting
+              if lang then
+                local source_side = diff_line.type == "del" and "old" or "new"
+                table.insert(projection_lines, {
+                  buffer_line = #lines,
+                  prefix_len = #prefix,
+                  source_side = source_side,
+                  old_lnum = diff_line.old_lnum,
+                  new_lnum = diff_line.new_lnum,
+                })
+
+                table.insert(code_lines, diff_line.text)
+                table.insert(
+                  code_line_mapping,
+                  { buffer_line = #lines, prefix_len = #prefix }
+                )
+              end
             end
           end
-        end
 
-        -- Apply syntax highlighting if we have a language
-        if lang then
-          local used_projection = false
-          if syntax_mode == "projection" and #projection_lines > 0 then
-            local cache_key = get_syntax_cache_key(file)
-            local projection = state.syntax_projection_cache[cache_key]
-            if projection then
-              for _, line_info in ipairs(projection_lines) do
-                local side_map = line_info.source_side == "old" and projection.old
-                  or projection.new
-                local side_lnum = line_info.source_side == "old" and line_info.old_lnum
-                  or line_info.new_lnum
-                if side_lnum and side_map[side_lnum] then
-                  for _, cap in ipairs(side_map[side_lnum]) do
-                    local col_start = line_info.prefix_len + cap.col_start
-                    local col_end = cap.col_end == -1 and -1
-                      or (line_info.prefix_len + cap.col_end)
-                    table.insert(syntax_highlights, {
-                      line_info.buffer_line,
-                      cap.hl_group,
-                      col_start,
-                      col_end,
-                    })
+          -- Apply syntax highlighting if we have a language
+          if lang then
+            local used_projection = false
+            if syntax_mode == "projection" and #projection_lines > 0 then
+              local cache_key = get_syntax_cache_key(file)
+              local projection = state.syntax_projection_cache[cache_key]
+              if projection then
+                for _, line_info in ipairs(projection_lines) do
+                  local side_map = line_info.source_side == "old" and projection.old
+                    or projection.new
+                  local side_lnum = line_info.source_side == "old" and line_info.old_lnum
+                    or line_info.new_lnum
+                  if side_lnum and side_map[side_lnum] then
+                    for _, cap in ipairs(side_map[side_lnum]) do
+                      local col_start = line_info.prefix_len + cap.col_start
+                      local col_end = cap.col_end == -1 and -1
+                        or (line_info.prefix_len + cap.col_end)
+                      table.insert(syntax_highlights, {
+                        line_info.buffer_line,
+                        cap.hl_group,
+                        col_start,
+                        col_end,
+                      })
+                    end
                   end
                 end
-              end
-              used_projection = true
-            elseif projection == nil then
-              table.insert(syntax_requests, { key = cache_key, file = file, lang = lang })
-            end
-          end
-
-          if (not used_projection) and #code_lines > 0 then
-            local syn_hls = syntax.get_highlights(code_lines, lang)
-            for _, hl in ipairs(syn_hls) do
-              local mapping = code_line_mapping[hl.line]
-              if mapping then
-                -- Offset columns by prefix length
-                local col_start = mapping.prefix_len + hl.col_start
-                local col_end = hl.col_end == -1 and -1
-                  or (mapping.prefix_len + hl.col_end)
-                table.insert(syntax_highlights, {
-                  mapping.buffer_line,
-                  hl.hl_group,
-                  col_start,
-                  col_end,
-                })
+                used_projection = true
+              elseif projection == nil then
+                table.insert(
+                  syntax_requests,
+                  { key = cache_key, file = file, lang = lang }
+                )
               end
             end
-          end
 
-          if used_projection then
-            table.insert(state.syntax_debug.projected_files, file.path)
-          elseif #code_lines > 0 then
-            table.insert(state.syntax_debug.fallback_files, file.path)
+            if (not used_projection) and #code_lines > 0 then
+              local syn_hls = syntax.get_highlights(code_lines, lang)
+              for _, hl in ipairs(syn_hls) do
+                local mapping = code_line_mapping[hl.line]
+                if mapping then
+                  -- Offset columns by prefix length
+                  local col_start = mapping.prefix_len + hl.col_start
+                  local col_end = hl.col_end == -1 and -1
+                    or (mapping.prefix_len + hl.col_end)
+                  table.insert(syntax_highlights, {
+                    mapping.buffer_line,
+                    hl.hl_group,
+                    col_start,
+                    col_end,
+                  })
+                end
+              end
+            end
+
+            if used_projection then
+              table.insert(state.syntax_debug.projected_files, file.path)
+            elseif #code_lines > 0 then
+              table.insert(state.syntax_debug.fallback_files, file.path)
+            else
+              state.syntax_debug.skipped_files[file.path] = "no diff lines"
+            end
           else
-            state.syntax_debug.skipped_files[file.path] = "no diff lines"
+            state.syntax_debug.skipped_files[file.path] = "no treesitter language"
           end
-        else
-          state.syntax_debug.skipped_files[file.path] = "no treesitter language"
         end
       end
     end
@@ -1158,6 +1259,8 @@ local function refresh()
         deletions = info.deletions,
         expanded = M.config.default_expanded,
         hunks = {},
+        hunk_status = "unloaded",
+        hunk_error = nil,
       })
     end
     table.sort(files, function(a, b)
@@ -1222,6 +1325,9 @@ toggle_mode = function()
   -- Clear hunks so they get reloaded
   for _, file in ipairs(state.files) do
     file.hunks = {}
+    file.hunk_status = "unloaded"
+    file.hunk_error = nil
+    file.hunk_job = nil
   end
   refresh()
 end
@@ -1233,6 +1339,12 @@ local function close()
     state.refresh_timer:close()
     state.refresh_timer = nil
   end
+  if state.render_timer then
+    state.render_timer:stop()
+    state.render_timer:close()
+    state.render_timer = nil
+  end
+  state.render_pending = false
   vim.api.nvim_clear_autocmds({ group = augroup })
   for win, _ in pairs(state.win_opts) do
     restore_window_opts(win)
@@ -1247,6 +1359,7 @@ local function close()
   state.load_error = nil
   state.loading_files = false
   state.refresh_seq = state.refresh_seq + 1
+  state.hunk_job_seq = state.hunk_job_seq + 1
   state.syntax_jobs = {}
   state.syntax_projection_cache = {}
 end
@@ -1401,9 +1514,21 @@ M.show_help = function()
   show_help()
 end
 
+local function pending_hunk_jobs()
+  local count = 0
+  for _, file in ipairs(state.files) do
+    if file.hunk_status == "loading" then
+      count = count + 1
+    end
+  end
+  return count
+end
+
 M._debug_state = function()
   return {
     loading_files = state.loading_files,
+    pending_hunk_jobs = pending_hunk_jobs(),
+    pending_render = state.render_pending,
     pending_syntax_jobs = vim.tbl_count(state.syntax_jobs),
     syntax_cache_entries = vim.tbl_count(state.syntax_projection_cache),
     syntax = vim.deepcopy(state.syntax_debug),
