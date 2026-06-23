@@ -120,6 +120,12 @@ local function notify(msg, level)
   vim.notify("[zdiff] " .. msg, level or vim.log.levels.INFO)
 end
 
+---@param msg string|nil
+---@return string
+local function render_error(msg)
+  return vim.trim((msg or "unknown git error"):gsub("%s+", " "))
+end
+
 ---@param value string
 ---@param allowed table<string, boolean>
 ---@param fallback string
@@ -1104,7 +1110,7 @@ local function refresh()
     if not result.ok then
       state.files = {}
       state.loading_files = false
-      state.load_error = result.error or "unknown git error"
+      state.load_error = render_error(result.error)
       render()
       return
     end

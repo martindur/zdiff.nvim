@@ -36,6 +36,15 @@ local function wait_for_loaded()
   assert.is_true(ok, "timed out waiting for zdiff to load")
 end
 
+local function get_normal_keymap(buf, lhs)
+  for _, km in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+    if km.lhs == lhs then
+      return km
+    end
+  end
+  return nil
+end
+
 describe("zdiff", function()
   local plugin_root
 
@@ -248,6 +257,24 @@ describe("zdiff", function()
         table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
       assert.is_truthy(second_content:find("b.txt", 1, true))
       assert.is_nil(second_content:find("a.txt", 1, true))
+    end)
+
+    it("should show git errors when toggle mode uses an invalid ref", function()
+      local repo = create_changed_repo("a.txt", "old\n", "new\n")
+      zdiff.config.default_branch = "missing-branch"
+
+      vim.cmd("cd " .. vim.fn.fnameescape(repo))
+      zdiff.open()
+      wait_for_loaded()
+
+      local toggle_keymap = get_normal_keymap(vim.api.nvim_get_current_buf(), "m")
+      assert.is_not_nil(toggle_keymap)
+      toggle_keymap.callback()
+      wait_for_loaded()
+
+      local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+      assert.is_truthy(content:find("Error loading changes", 1, true))
+      assert.is_nil(content:find("No changes found", 1, true))
     end)
   end)
 end)

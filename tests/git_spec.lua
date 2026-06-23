@@ -54,6 +54,26 @@ local function find_file(files, path)
 end
 
 describe("git adapter", function()
+  it("returns git stderr for failed line commands", function()
+    local repo = create_repo()
+    local result = git.run_lines(repo, { "rev-parse", "--verify", "missing-ref" })
+
+    assert.is_false(result.ok)
+    assert.is_truthy(result.error:find("Needed a single revision", 1, true))
+  end)
+
+  it("lists staged files before the first commit", function()
+    local repo = create_repo()
+    write_file(repo .. "/new.txt", "one\n")
+    run_git(repo, { "add", "--", "new.txt" })
+
+    local file = find_file(diff_files(repo), "new.txt")
+    assert.is_not_nil(file)
+    assert.equals("A", file.status)
+    assert.equals(1, file.insertions)
+    assert.equals(0, file.deletions)
+  end)
+
   it("parses NUL-delimited paths without Git quote escaping", function()
     local repo = create_repo()
     local path = "tabs\tcafé.txt"

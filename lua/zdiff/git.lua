@@ -61,7 +61,8 @@ end
 function M.run_lines(root, args)
   local argv = git_argv(root, args)
   local lines = vim.fn.systemlist(argv)
-  local result = build_result(argv, vim.v.shell_error, "", "")
+  local output = table.concat(lines, "\n")
+  local result = build_result(argv, vim.v.shell_error, output, output)
   if not result.ok then
     return { ok = false, error = result.error }
   end
@@ -132,6 +133,12 @@ function M.ref_exists(root, ref)
     return { ok = true }
   end
   return { ok = false, error = result.error or ("invalid git ref: " .. ref) }
+end
+
+---@param root string
+---@return boolean
+local function has_head(root)
+  return M.run_lines(root, { "rev-parse", "--verify", "HEAD" }).ok
 end
 
 ---@param text string
@@ -279,13 +286,17 @@ local function parse_name_status_z(stdout)
   return records
 end
 
+---@param root string
 ---@param base_ref string|nil
----@return string
-local function diff_target(base_ref)
+---@return string[]
+local function diff_target(root, base_ref)
   if base_ref then
-    return base_ref .. "...HEAD"
+    return { base_ref .. "...HEAD" }
   end
-  return "HEAD"
+  if has_head(root) then
+    return { "HEAD" }
+  end
+  return { "--cached" }
 end
 
 ---@param root string
@@ -369,7 +380,9 @@ end
 ---@param file ZdiffGitFile
 ---@return {ok: boolean, data?: string[], error?: string}
 function M.file_diff_lines(root, base_ref, file)
-  local args = { "diff", diff_target(base_ref), "--" }
+  local args = { "diff" }
+  vim.list_extend(args, diff_target(root, base_ref))
+  table.insert(args, "--")
   local seen = {}
   for _, path in ipairs({ file.old_path, file.new_path, file.path }) do
     if path and path ~= "" and not seen[path] then
@@ -385,14 +398,20 @@ end
 ---@param base_ref string|nil
 ---@param done fun(result: {ok: boolean, data?: ZdiffGitFile[], error?: string})
 function M.diff_files_async(root, base_ref, done)
-  local target = diff_target(base_ref)
-  M.run_async(root, { "diff", "-z", "--numstat", target }, function(numstat_result)
+  local target = diff_target(root, base_ref)
+  local numstat_args = { "diff", "-z", "--numstat" }
+  vim.list_extend(numstat_args, target)
+
+  M.run_async(root, numstat_args, function(numstat_result)
     if not numstat_result.ok then
       done({ ok = false, error = numstat_result.error })
       return
     end
 
-    M.run_async(root, { "diff", "-z", "--name-status", target }, function(status_result)
+    local status_args = { "diff", "-z", "--name-status" }
+    vim.list_extend(status_args, target)
+
+    M.run_async(root, status_args, function(status_result)
       if not status_result.ok then
         done({ ok = false, error = status_result.error })
         return
