@@ -1,4 +1,5 @@
 local syntax = require("zdiff.syntax")
+local python = require("zdiff.syntax.python")
 
 local function has_group(highlights, group)
   for _, hl in ipairs(highlights) do
@@ -10,6 +11,12 @@ local function has_group(highlights, group)
 end
 
 describe("syntax module", function()
+  local fake_sql_syntax = {
+    get_lang_from_filetype = function(ft)
+      return ft == "sql" and "sql" or nil
+    end,
+  }
+
   it("prefers native tree-sitter languages before aliases", function()
     local native = vim.treesitter.language.get_lang("javascript")
     if not native or not syntax.has_highlights(native) then
@@ -73,5 +80,23 @@ describe("syntax module", function()
     }, "python")
 
     assert.is_true(has_group(highlights, "@keyword"))
+  end)
+
+  it("detects python sql strings from assignment context", function()
+    local injections = python.get_injections({
+      'statement_text = """not keywords"""',
+    }, fake_sql_syntax)
+
+    assert.equals(1, #injections)
+    assert.equals("not keywords", injections[1].lines[1])
+  end)
+
+  it("detects python sql strings from content", function()
+    local injections = python.get_injections({
+      'message = """SELECT id FROM users"""',
+    }, fake_sql_syntax)
+
+    assert.equals(1, #injections)
+    assert.equals("SELECT id FROM users", injections[1].lines[1])
   end)
 end)

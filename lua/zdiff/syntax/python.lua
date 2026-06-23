@@ -18,7 +18,13 @@ end
 ---@param line string
 ---@return boolean
 local function context_looks_sql(line)
-  return line:lower():match("[%w_]*(sql|query|statement)[%w_]*%s*=") ~= nil
+  local name = line:lower():match("([%w_]+)%s*=%s*$")
+  if not name then
+    return false
+  end
+  return name:find("sql", 1, true) ~= nil
+    or name:find("query", 1, true) ~= nil
+    or name:find("statement", 1, true) ~= nil
 end
 
 ---@param lines string[]
@@ -87,7 +93,7 @@ function M.get_injections(code, syntax)
       local open_start, open_end, marker = find_triple_quote(line)
       if marker then
         local after_open = line:sub(open_end + 1)
-        string = {
+        local sql_string = {
           marker = marker,
           sql_context = context_looks_sql(line:sub(1, open_start - 1)),
           lines = {},
@@ -95,11 +101,25 @@ function M.get_injections(code, syntax)
           line_offset = line_idx - 1,
         }
 
-        if after_open ~= "" then
-          table.insert(string.lines, after_open)
-          string.col_offsets[#string.lines] = open_end
+        local close_start = after_open:find(marker, 1, true)
+        if close_start then
+          local before_close = after_open:sub(1, close_start - 1)
+          if before_close ~= "" then
+            table.insert(sql_string.lines, before_close)
+            sql_string.col_offsets[#sql_string.lines] = open_end
+          end
+
+          local injection = build_sql_injection(sql_string, sql_lang)
+          if injection then
+            table.insert(injections, injection)
+          end
+        elseif after_open ~= "" then
+          table.insert(sql_string.lines, after_open)
+          sql_string.col_offsets[#sql_string.lines] = open_end
+          string = sql_string
         else
-          string.line_offset = line_idx
+          sql_string.line_offset = line_idx
+          string = sql_string
         end
       end
     end
