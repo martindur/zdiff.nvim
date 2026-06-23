@@ -83,7 +83,7 @@ local update_winbar
 ---@class ZdiffConfig
 ---@field default_expanded boolean Whether files are expanded by default
 ---@field default_branch string|nil Default branch for toggle_mode (e.g., "main", "develop")
----@field keymaps table<string, string> Keymap bindings
+---@field keymaps table<string, string|false|nil> Keymap bindings
 ---@field icons table<string, string> Icons for UI elements
 ---@field syntax table Syntax highlight preferences
 
@@ -124,6 +124,16 @@ end
 ---@return string
 local function render_error(msg)
   return vim.trim((msg or "unknown git error"):gsub("%s+", " "))
+end
+
+---@param name string
+---@return string|nil
+local function keymap_lhs(name)
+  local lhs = M.config.keymaps[name]
+  if type(lhs) == "string" and lhs ~= "" then
+    return lhs
+  end
+  return nil
 end
 
 ---@param value string
@@ -987,17 +997,21 @@ end
 
 ---Show help in a floating window
 show_help = function()
-  local keymaps = {
-    { M.config.keymaps.goto_file, "Go to file/line" },
-    { M.config.keymaps.toggle, "Toggle expand/collapse" },
-    { M.config.keymaps.toggle_mode, "Toggle mode (uncommitted/branch)" },
-    { M.config.keymaps.refresh, "Refresh" },
-    { M.config.keymaps.close, "Close zdiff" },
-    { M.config.keymaps.help, "Show this help" },
+  local configured_keymaps = {
+    { "goto_file", "Go to file/line" },
+    { "toggle", "Toggle expand/collapse" },
+    { "toggle_mode", "Toggle mode (uncommitted/branch)" },
+    { "refresh", "Refresh" },
+    { "close", "Close zdiff" },
+    { "help", "Show this help" },
+    { "yank_ref", "Yank file:line reference" },
   }
-
-  if M.config.keymaps.yank_ref then
-    table.insert(keymaps, { M.config.keymaps.yank_ref, "Yank file:line reference" })
+  local keymaps = {}
+  for _, map in ipairs(configured_keymaps) do
+    local lhs = keymap_lhs(map[1])
+    if lhs then
+      table.insert(keymaps, { lhs, map[2] })
+    end
   end
 
   -- Find the longest description to calculate width
@@ -1298,19 +1312,27 @@ function M.open(base_ref)
 
   -- Set up keymaps
   local opts = { buffer = state.buf, silent = true }
-  vim.keymap.set("n", M.config.keymaps.goto_file, goto_source, opts)
-  vim.keymap.set("n", M.config.keymaps.toggle, toggle_expand, opts)
-  vim.keymap.set("n", M.config.keymaps.close, close, opts)
-  vim.keymap.set("n", M.config.keymaps.refresh, refresh, opts)
-  vim.keymap.set("n", M.config.keymaps.toggle_mode, toggle_mode, opts)
-  vim.keymap.set("n", M.config.keymaps.help, show_help, opts)
+  local mappings = {
+    { "goto_file", goto_source },
+    { "toggle", toggle_expand },
+    { "close", close },
+    { "refresh", refresh },
+    { "toggle_mode", toggle_mode },
+    { "help", show_help },
+  }
+  for _, map in ipairs(mappings) do
+    local lhs = keymap_lhs(map[1])
+    if lhs then
+      vim.keymap.set("n", lhs, map[2], opts)
+    end
+  end
 
-  if M.config.keymaps.yank_ref then
-    vim.keymap.set("n", M.config.keymaps.yank_ref, function()
+  local yank_ref_key = keymap_lhs("yank_ref")
+  if yank_ref_key then
+    vim.keymap.set("n", yank_ref_key, function()
       local cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
       yank_ref(cursor_line, cursor_line)
     end, { buffer = state.buf, silent = true })
-    local yank_ref_key = M.config.keymaps.yank_ref
     vim.api.nvim_buf_set_keymap(
       state.buf,
       "v",

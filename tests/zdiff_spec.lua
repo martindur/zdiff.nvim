@@ -45,6 +45,15 @@ local function get_normal_keymap(buf, lhs)
   return nil
 end
 
+local function get_visual_keymap(buf, lhs)
+  for _, km in ipairs(vim.api.nvim_buf_get_keymap(buf, "v")) do
+    if km.lhs == lhs then
+      return km
+    end
+  end
+  return nil
+end
+
 local function find_line(text)
   local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
   for i, line in ipairs(lines) do
@@ -285,6 +294,52 @@ describe("zdiff", function()
       local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
       assert.is_truthy(content:find("Error loading changes", 1, true))
       assert.is_nil(content:find("No changes found", 1, true))
+    end)
+
+    it("should skip disabled and invalid keymaps", function()
+      zdiff.setup({
+        keymaps = {
+          goto_file = false,
+          toggle = false,
+          close = false,
+          refresh = 123,
+          toggle_mode = "",
+          help = false,
+          yank_ref = false,
+        },
+      })
+
+      zdiff.open()
+      local buf = vim.api.nvim_get_current_buf()
+
+      assert.is_nil(get_normal_keymap(buf, "<CR>"))
+      assert.is_nil(get_normal_keymap(buf, "<Tab>"))
+      assert.is_nil(get_normal_keymap(buf, "q"))
+      assert.is_nil(get_normal_keymap(buf, "R"))
+      assert.is_nil(get_normal_keymap(buf, "m"))
+      assert.is_nil(get_normal_keymap(buf, "?"))
+      assert.is_nil(get_normal_keymap(buf, "gy"))
+      assert.is_nil(get_visual_keymap(buf, "gy"))
+    end)
+
+    it("should only show enabled keymaps in help", function()
+      zdiff.setup({
+        keymaps = {
+          close = false,
+          yank_ref = false,
+        },
+      })
+
+      zdiff.show_help()
+      local help_buf = vim.api.nvim_get_current_buf()
+      local content =
+        table.concat(vim.api.nvim_buf_get_lines(help_buf, 0, -1, false), "\n")
+
+      assert.is_truthy(content:find("Go to file", 1, true))
+      assert.is_nil(content:find("Close zdiff", 1, true))
+      assert.is_nil(content:find("Yank file:line reference", 1, true))
+
+      vim.api.nvim_win_close(vim.api.nvim_get_current_win(), true)
     end)
 
     it("should not open deleted files from the worktree", function()
