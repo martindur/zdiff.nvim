@@ -329,6 +329,20 @@ describe("zdiff", function()
       assert.equals(1, calls)
     end)
 
+    it("should ignore non-source diff metadata lines", function()
+      local repo = create_changed_repo("no-newline.txt", "old", "new")
+      zdiff.config.default_expanded = true
+
+      vim.cmd("cd " .. vim.fn.fnameescape(repo))
+      zdiff.open()
+      wait_for_loaded()
+
+      local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+      assert.is_truthy(content:find("old", 1, true))
+      assert.is_truthy(content:find("new", 1, true))
+      assert.is_nil(content:find("No newline at end of file", 1, true))
+    end)
+
     it("should skip disabled and invalid keymaps", function()
       zdiff.setup({
         keymaps = {

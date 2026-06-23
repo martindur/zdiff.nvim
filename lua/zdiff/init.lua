@@ -288,7 +288,7 @@ local function parse_diff_hunks(diff_lines)
         new_count = new_count,
         lines = {},
       }
-    elseif current_hunk then
+    elseif current_hunk and not line:match("^\\") then
       local diff_line = {
         text = line:sub(2), -- Remove the +/- prefix
         type = "context",
