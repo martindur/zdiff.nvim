@@ -1,7 +1,47 @@
 local zdiff = require("zdiff")
 
+local function run_git(repo, args)
+  local argv = { "git", "-C", repo }
+  vim.list_extend(argv, args)
+  local out = vim.fn.system(argv)
+  if vim.v.shell_error ~= 0 then
+    error("git command failed: " .. table.concat(argv, " ") .. "\n" .. out)
+  end
+  return out
+end
+
+local function write_file(path, text)
+  local f = assert(io.open(path, "w"))
+  f:write(text)
+  f:close()
+end
+
+local function create_changed_repo(filename, baseline, changed)
+  local repo = vim.fn.tempname()
+  vim.fn.mkdir(repo, "p")
+  run_git(repo, { "init" })
+  run_git(repo, { "config", "user.name", "zdiff-test" })
+  run_git(repo, { "config", "user.email", "zdiff@example.com" })
+  write_file(repo .. "/" .. filename, baseline)
+  run_git(repo, { "add", "--", "." })
+  run_git(repo, { "commit", "-m", "baseline" })
+  write_file(repo .. "/" .. filename, changed)
+  return repo
+end
+
+local function wait_for_loaded()
+  local ok = vim.wait(5000, function()
+    return not zdiff._debug_state().loading_files
+  end, 50)
+  assert.is_true(ok, "timed out waiting for zdiff to load")
+end
+
 describe("zdiff", function()
+  local plugin_root
+
   before_each(function()
+    plugin_root = vim.fn.getcwd()
+
     -- Reset config to defaults before each test
     zdiff.config = {
       default_expanded = false,
@@ -38,6 +78,7 @@ describe("zdiff", function()
         end
       end
     end
+    vim.cmd("cd " .. vim.fn.fnameescape(plugin_root))
   end)
 
   describe("setup", function()
@@ -167,20 +208,46 @@ describe("zdiff", function()
       local help_buf = vim.api.nvim_win_get_buf(float_win)
 
       -- Window should still be valid (not closed immediately)
-      assert.is_true(vim.api.nvim_win_is_valid(float_win), "Help window should remain open")
+      assert.is_true(
+        vim.api.nvim_win_is_valid(float_win),
+        "Help window should remain open"
+      )
 
       -- Check buffer content contains expected text
       local lines = vim.api.nvim_buf_get_lines(help_buf, 0, -1, false)
       local content = table.concat(lines, "\n")
 
       assert.is_truthy(content:find("zdiff keymaps"), "Help should contain title")
-      assert.is_truthy(content:find("Go to file"), "Help should contain goto_file description")
+      assert.is_truthy(
+        content:find("Go to file"),
+        "Help should contain goto_file description"
+      )
       assert.is_truthy(content:find("Toggle"), "Help should contain toggle description")
       assert.is_truthy(content:find("Close"), "Help should contain close description")
       assert.is_truthy(content:find("Press any key"), "Help should contain footer")
 
       -- Clean up
       vim.api.nvim_win_close(float_win, true)
+    end)
+
+    it("should not reuse a zdiff session across repository roots", function()
+      local repo_a = create_changed_repo("a.txt", "a old\n", "a new\n")
+      local repo_b = create_changed_repo("b.txt", "b old\n", "b new\n")
+
+      vim.cmd("cd " .. vim.fn.fnameescape(repo_a))
+      zdiff.open()
+      wait_for_loaded()
+      local first_content =
+        table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+      assert.is_truthy(first_content:find("a.txt", 1, true))
+
+      vim.cmd("cd " .. vim.fn.fnameescape(repo_b))
+      zdiff.open()
+      wait_for_loaded()
+      local second_content =
+        table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+      assert.is_truthy(second_content:find("b.txt", 1, true))
+      assert.is_nil(second_content:find("a.txt", 1, true))
     end)
   end)
 end)

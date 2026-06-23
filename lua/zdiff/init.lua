@@ -1,11 +1,15 @@
 local M = {}
 local display = require("zdiff.display")
+local git = require("zdiff.git")
 local syntax = require("zdiff.syntax")
 local winbar = require("zdiff.winbar")
 
 -- State
 ---@class ZdiffFile
----@field path string relative file path
+---@field path string current relative file path, or old path for deleted files
+---@field display_path string path shown in the UI
+---@field old_path string|nil old-side relative file path
+---@field new_path string|nil new-side relative file path
 ---@field status string git status (M, A, D, etc.)
 ---@field insertions number lines added
 ---@field deletions number lines deleted
@@ -29,7 +33,9 @@ local winbar = require("zdiff.winbar")
 ---@field files ZdiffFile[]
 ---@field buf number|nil buffer handle
 ---@field win number|nil window handle
+---@field root string|nil git repository root for the current zdiff session
 ---@field base_ref string|nil the git ref to diff against (nil = uncommitted changes vs HEAD)
+---@field load_error string|nil most recent file loading error
 ---@field line_map table<number, {file_idx: number, hunk_idx: number|nil, line_idx: number|nil, lnum: number|nil}>
 ---@field file_header_lines table<number, number>
 ---@field loading_files boolean whether file list refresh is in progress
@@ -46,7 +52,9 @@ local state = {
   files = {},
   buf = nil,
   win = nil,
+  root = nil,
   base_ref = nil,
+  load_error = nil,
   line_map = {},
   file_header_lines = {},
   loading_files = false,
@@ -196,148 +204,6 @@ local ns_syntax = vim.api.nvim_create_namespace("zdiff_syntax")
 local ns_markers = vim.api.nvim_create_namespace("zdiff_markers")
 local augroup = vim.api.nvim_create_augroup("zdiff", { clear = false })
 
----@param argv string[]
----@param callback fun(code: number, lines: string[])
----@param opts? {preserve_empty_lines?: boolean}
-local function run_command_async(argv, callback, opts)
-  local preserve_empty_lines = opts and opts.preserve_empty_lines == true
-  if vim.system then
-    vim.system(argv, { text = true }, function(obj)
-      local lines = {}
-      if obj.stdout and obj.stdout ~= "" then
-        if preserve_empty_lines then
-          lines = vim.split(obj.stdout, "\n", { plain = true })
-          if #lines > 0 and lines[#lines] == "" then
-            table.remove(lines, #lines)
-          end
-        else
-          lines = vim.split(obj.stdout, "\n", { plain = true, trimempty = true })
-        end
-      end
-      vim.schedule(function()
-        callback(obj.code or 1, lines)
-      end)
-    end)
-    return
-  end
-
-  local stdout = {}
-  local job_id = vim.fn.jobstart(argv, {
-    stdout_buffered = true,
-    on_stdout = function(_, data)
-      if data then
-        stdout = data
-      end
-    end,
-    on_exit = function(_, code)
-      vim.schedule(function()
-        local lines = {}
-        for _, line in ipairs(stdout) do
-          if preserve_empty_lines or line ~= "" then
-            table.insert(lines, line)
-          end
-        end
-        callback(code or 1, lines)
-      end)
-    end,
-  })
-  if job_id <= 0 then
-    vim.schedule(function()
-      callback(1, {})
-    end)
-  end
-end
-
----Get the git root directory
----@return string|nil
-local function get_git_root()
-  local result = vim.fn.systemlist("git rev-parse --show-toplevel")
-  if vim.v.shell_error ~= 0 then
-    return nil
-  end
-  return result[1]
-end
-
----@param rel_path string
----@return number
-local function count_file_lines(rel_path)
-  local git_root = get_git_root()
-  if not git_root then
-    return 0
-  end
-  local filepath = git_root .. "/" .. rel_path
-  local line_count = 0
-  local file = io.open(filepath, "r")
-  if file then
-    for _ in file:lines() do
-      line_count = line_count + 1
-    end
-    file:close()
-  end
-  return line_count
-end
-
----Asynchronously parse git diff stats output
----@param base_ref string|nil git ref to diff against, or nil for uncommitted
----@param done fun(stats: table<string, {insertions: number, deletions: number, status: string}>)
-local function get_diff_stats_async(base_ref, done)
-  local diff_target
-  if base_ref then
-    diff_target = base_ref .. "...HEAD"
-  else
-    diff_target = "HEAD"
-  end
-
-  local stats = {}
-  run_command_async({ "git", "diff", "--numstat", diff_target }, function(_, result)
-    for _, line in ipairs(result) do
-      local ins, del, path = line:match("^(%d+)%s+(%d+)%s+(.+)$")
-      if path then
-        stats[path] = {
-          insertions = tonumber(ins) or 0,
-          deletions = tonumber(del) or 0,
-          status = "M",
-        }
-      end
-    end
-
-    run_command_async(
-      { "git", "diff", "--name-status", diff_target },
-      function(_, status_result)
-        for _, line in ipairs(status_result) do
-          local status, path = line:match("^(%a)%s+(.+)$")
-          if path and stats[path] then
-            stats[path].status = status
-          elseif path then
-            stats[path] = { insertions = 0, deletions = 0, status = status }
-          end
-        end
-
-        if base_ref then
-          done(stats)
-          return
-        end
-
-        run_command_async(
-          { "git", "ls-files", "--others", "--exclude-standard" },
-          function(_, untracked_result)
-            for _, path in ipairs(untracked_result) do
-              if path ~= "" and not stats[path] then
-                stats[path] = {
-                  insertions = count_file_lines(path),
-                  deletions = 0,
-                  status = "?",
-                }
-              end
-            end
-            done(stats)
-          end
-        )
-      end
-    )
-  end)
-end
-
 ---Parse a unified diff hunk header
 ---@param header string the @@ line
 ---@return number old_start, number old_count, number new_start, number new_count
@@ -410,25 +276,25 @@ local function parse_diff_hunks(diff_lines)
 end
 
 ---Get diff hunks for a specific file
----@param filepath string
+---@param file ZdiffFile
 ---@param base_ref string|nil git ref to diff against, or nil for uncommitted
----@param status string|nil file status (e.g., "M", "A", "D", "?")
 ---@return ZdiffHunk[]
-local function get_file_diff(filepath, base_ref, status)
+local function get_file_diff(file, base_ref)
   -- For untracked files, show entire file as additions
-  if status == "?" then
-    local git_root = get_git_root()
-    local full_path = git_root .. "/" .. filepath
-    local file = io.open(full_path, "r")
-    if not file then
+  if file.status == "?" then
+    if not state.root then
+      return {}
+    end
+
+    local result = git.read_worktree_lines(state.root, file.path)
+    if not result.ok then
       return {}
     end
 
     local lines = {}
-    for line in file:lines() do
+    for _, line in ipairs(result.data or {}) do
       table.insert(lines, { type = "add", text = line, new_lnum = #lines + 1 })
     end
-    file:close()
 
     if #lines == 0 then
       return {}
@@ -446,48 +312,16 @@ local function get_file_diff(filepath, base_ref, status)
     }
   end
 
-  local cmd
-  if base_ref then
-    cmd = string.format(
-      "git diff %s...HEAD -- %s",
-      vim.fn.shellescape(base_ref),
-      vim.fn.shellescape(filepath)
-    )
-  else
-    cmd = string.format("git diff HEAD -- %s", vim.fn.shellescape(filepath))
-  end
-
-  local result = vim.fn.systemlist(cmd)
-  if vim.v.shell_error ~= 0 then
+  if not state.root then
     return {}
   end
 
-  return parse_diff_hunks(result)
-end
+  local result = git.file_diff_lines(state.root, base_ref, file)
+  if not result.ok then
+    return {}
+  end
 
----@param base_ref string|nil git ref to diff against, or nil for uncommitted
----@param done fun(files: ZdiffFile[])
-local function load_files_async(base_ref, done)
-  get_diff_stats_async(base_ref, function(stats)
-    local files = {}
-
-    for path, info in pairs(stats) do
-      table.insert(files, {
-        path = path,
-        status = info.status,
-        insertions = info.insertions,
-        deletions = info.deletions,
-        expanded = M.config.default_expanded,
-        hunks = {},
-      })
-    end
-
-    table.sort(files, function(a, b)
-      return a.path < b.path
-    end)
-
-    done(files)
-  end)
+  return parse_diff_hunks(result.data or {})
 end
 
 ---Get the status icon for a file
@@ -515,39 +349,36 @@ end
 ---@param filepath string
 ---@return string[]
 local function read_worktree_lines(filepath)
-  local git_root = get_git_root()
-  if not git_root then
+  if not state.root then
     return {}
   end
-  local full_path = git_root .. "/" .. filepath
-  local file = io.open(full_path, "r")
-  if not file then
+  local result = git.read_worktree_lines(state.root, filepath)
+  if not result.ok then
     return {}
   end
-  local lines = {}
-  for line in file:lines() do
-    table.insert(lines, line)
-  end
-  file:close()
-  return lines
+  return result.data or {}
 end
 
 ---@param rev string
 ---@param filepath string
 ---@param done fun(lines: string[])
 local function read_git_file_lines_async(rev, filepath, done)
-  run_command_async({ "git", "show", rev .. ":" .. filepath }, function(code, lines)
-    if code ~= 0 then
+  if not state.root then
+    done({})
+    return
+  end
+  git.read_git_file_lines_async(state.root, rev, filepath, function(result)
+    if not result.ok then
       done({})
       return
     end
-    done(lines)
-  end, { preserve_empty_lines = true })
+    done(result.data or {})
+  end)
 end
 
 ---@param file ZdiffFile
 ---@param side "old"|"new"
----@return "empty"|"worktree"|"git", string|nil
+---@return "empty"|"worktree"|"git", string|nil, string|nil
 local function get_content_source(file, side)
   local status = file.status
   if side == "old" then
@@ -555,25 +386,25 @@ local function get_content_source(file, side)
       return "empty", nil
     end
     if state.base_ref then
-      return "git", state.base_ref
+      return "git", state.base_ref, file.old_path or file.path
     end
-    return "git", "HEAD"
+    return "git", "HEAD", file.old_path or file.path
   end
 
   if status == "D" then
     return "empty", nil
   end
   if state.base_ref then
-    return "git", "HEAD"
+    return "git", "HEAD", file.new_path or file.path
   end
-  return "worktree", nil
+  return "worktree", nil, file.new_path or file.path
 end
 
 ---@param file ZdiffFile
 ---@param done fun(old_lines: string[], new_lines: string[])
 local function get_projection_sources_async(file, done)
-  local old_kind, old_rev = get_content_source(file, "old")
-  local new_kind, new_rev = get_content_source(file, "new")
+  local old_kind, old_rev, old_path = get_content_source(file, "old")
+  local new_kind, new_rev, new_path = get_content_source(file, "new")
 
   local function load_new(old_lines)
     if new_kind == "empty" then
@@ -581,10 +412,10 @@ local function get_projection_sources_async(file, done)
       return
     end
     if new_kind == "worktree" then
-      done(old_lines, read_worktree_lines(file.path))
+      done(old_lines, read_worktree_lines(new_path or file.path))
       return
     end
-    read_git_file_lines_async(new_rev, file.path, function(new_lines)
+    read_git_file_lines_async(new_rev, new_path or file.path, function(new_lines)
       done(old_lines, new_lines)
     end)
   end
@@ -594,10 +425,10 @@ local function get_projection_sources_async(file, done)
     return
   end
   if old_kind == "worktree" then
-    load_new(read_worktree_lines(file.path))
+    load_new(read_worktree_lines(old_path or file.path))
     return
   end
-  read_git_file_lines_async(old_rev, file.path, function(old_lines)
+  read_git_file_lines_async(old_rev, old_path or file.path, function(old_lines)
     load_new(old_lines)
   end)
 end
@@ -640,8 +471,12 @@ end
 ---@return string
 local function get_syntax_cache_key(file)
   local pieces = {
+    state.root or "",
     state.base_ref or "",
     file.path,
+    file.display_path or "",
+    file.old_path or "",
+    file.new_path or "",
     file.status,
     tostring(file.insertions),
     tostring(file.deletions),
@@ -744,7 +579,9 @@ render = function()
 
   if #state.files == 0 then
     table.insert(lines, "")
-    if state.loading_files then
+    if state.load_error then
+      table.insert(lines, "  Error loading changes: " .. state.load_error)
+    elseif state.loading_files then
       table.insert(lines, "  Loading changed files...")
     else
       table.insert(lines, "  No changes found")
@@ -757,8 +594,14 @@ render = function()
       local status_icon = get_status_icon(file.status)
       local add_stat = string.format("+%d", file.insertions)
       local del_stat = string.format("-%d", file.deletions)
-      local file_line =
-        string.format("%s %s %s  %s %s", icon, status_icon, file.path, add_stat, del_stat)
+      local file_line = string.format(
+        "%s %s %s  %s %s",
+        icon,
+        status_icon,
+        file.display_path or file.path,
+        add_stat,
+        del_stat
+      )
       table.insert(lines, file_line)
 
       -- Map this line to the file
@@ -783,7 +626,7 @@ render = function()
       if file.expanded then
         -- Load hunks if not already loaded
         if #file.hunks == 0 then
-          file.hunks = get_file_diff(file.path, state.base_ref, file.status)
+          file.hunks = get_file_diff(file, state.base_ref)
         end
 
         -- Get language for syntax highlighting
@@ -1013,8 +856,7 @@ goto_source = function()
     return
   end
 
-  local git_root = get_git_root()
-  local filepath = git_root and (git_root .. "/" .. file.path) or file.path
+  local filepath = state.root and (state.root .. "/" .. file.path) or file.path
 
   -- Determine target line
   local target_line = 1
@@ -1236,29 +1078,65 @@ local function refresh()
   -- Remember expanded state by path
   local expanded_state = {}
   for _, file in ipairs(state.files) do
-    expanded_state[file.path] = file.expanded
+    expanded_state[file.display_path or file.path] = file.expanded
   end
 
   state.refresh_seq = state.refresh_seq + 1
   local refresh_seq = state.refresh_seq
   state.loading_files = true
+  state.load_error = nil
   state.syntax_jobs = {}
   state.syntax_projection_cache = {}
   render()
 
-  load_files_async(state.base_ref, function(files)
+  if not state.root then
+    state.loading_files = false
+    state.load_error = "no git repository root for current session"
+    render()
+    return
+  end
+
+  git.diff_files_async(state.root, state.base_ref, function(result)
     if refresh_seq ~= state.refresh_seq then
       return
     end
 
+    if not result.ok then
+      state.files = {}
+      state.loading_files = false
+      state.load_error = result.error or "unknown git error"
+      render()
+      return
+    end
+
+    local files = {}
+    for _, info in ipairs(result.data or {}) do
+      table.insert(files, {
+        path = info.path,
+        display_path = info.display_path,
+        old_path = info.old_path,
+        new_path = info.new_path,
+        status = info.status,
+        insertions = info.insertions,
+        deletions = info.deletions,
+        expanded = M.config.default_expanded,
+        hunks = {},
+      })
+    end
+    table.sort(files, function(a, b)
+      return a.display_path < b.display_path
+    end)
+
     state.files = files
     for _, file in ipairs(state.files) do
-      if expanded_state[file.path] ~= nil then
-        file.expanded = expanded_state[file.path]
+      local key = file.display_path or file.path
+      if expanded_state[key] ~= nil then
+        file.expanded = expanded_state[key]
       end
     end
 
     state.loading_files = false
+    state.load_error = nil
     render()
 
     -- Restore cursor position (clamped to valid range)
@@ -1325,8 +1203,11 @@ local function close()
   if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
     vim.api.nvim_buf_delete(state.buf, { force = true })
   end
+  state.files = {}
   state.buf = nil
   state.win = nil
+  state.root = nil
+  state.load_error = nil
   state.loading_files = false
   state.refresh_seq = state.refresh_seq + 1
   state.syntax_jobs = {}
@@ -1337,17 +1218,17 @@ end
 ---@param base_ref? string git ref to diff against (e.g., "main", "develop", "HEAD~3"). If nil, shows uncommitted changes.
 function M.open(base_ref)
   -- Check if we're in a git repo
-  if not get_git_root() then
+  local root_result = git.root()
+  if not root_result.ok then
     notify("Not in a git repository", vim.log.levels.ERROR)
     return
   end
+  local root = root_result.data
 
   -- Validate the ref if provided
   if base_ref and base_ref ~= "" then
-    vim.fn.system(
-      "git rev-parse --verify " .. vim.fn.shellescape(base_ref) .. " 2>/dev/null"
-    )
-    if vim.v.shell_error ~= 0 then
+    local ref_result = git.ref_exists(root, base_ref)
+    if not ref_result.ok then
       notify("Invalid git ref: " .. base_ref, vim.log.levels.ERROR)
       return
     end
@@ -1357,7 +1238,7 @@ function M.open(base_ref)
 
   -- If zdiff buffer already exists and we're switching refs, close it first
   if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
-    if state.base_ref == base_ref then
+    if state.root == root and state.base_ref == base_ref then
       -- Same ref, just switch to the buffer
       state.win = vim.api.nvim_get_current_win()
       vim.api.nvim_win_set_buf(state.win, state.buf)
@@ -1371,7 +1252,9 @@ function M.open(base_ref)
     end
   end
 
+  state.root = root
   state.base_ref = base_ref
+  state.load_error = nil
 
   -- Create buffer
   state.buf = vim.api.nvim_create_buf(false, true)

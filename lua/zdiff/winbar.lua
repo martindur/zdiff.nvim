@@ -17,7 +17,7 @@ function M.format_file(file, icons)
 
   return table.concat({
     "%#Directory# ",
-    statusline_escape(status_icon .. " " .. file.path),
+    statusline_escape(status_icon .. " " .. (file.display_path or file.path)),
     "  %#DiffAdd#",
     statusline_escape(add_stat),
     "%* %#DiffDelete#",
