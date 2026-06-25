@@ -7,10 +7,22 @@ function M.check()
   local nvim_version = vim.version()
   if nvim_version.major == 0 and nvim_version.minor < 9 then
     vim.health.error(
-      string.format("Neovim 0.9+ required, found %d.%d.%d", nvim_version.major, nvim_version.minor, nvim_version.patch)
+      string.format(
+        "Neovim 0.9+ required, found %d.%d.%d",
+        nvim_version.major,
+        nvim_version.minor,
+        nvim_version.patch
+      )
     )
   else
-    vim.health.ok(string.format("Neovim version %d.%d.%d", nvim_version.major, nvim_version.minor, nvim_version.patch))
+    vim.health.ok(
+      string.format(
+        "Neovim version %d.%d.%d",
+        nvim_version.major,
+        nvim_version.minor,
+        nvim_version.patch
+      )
+    )
   end
 
   -- Check git is available
@@ -34,7 +46,9 @@ function M.check()
   if has_ts then
     vim.health.ok("nvim-treesitter is available (syntax highlighting in diffs)")
   else
-    vim.health.info("nvim-treesitter not found (optional: enables syntax highlighting in expanded diffs)")
+    vim.health.info(
+      "nvim-treesitter not found (optional: enables syntax highlighting in expanded diffs)"
+    )
   end
 end
 

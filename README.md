@@ -225,6 +225,18 @@ make syntax-gallery
 make syntax-gallery-clean
 ```
 
+Format tracked Lua files with `stylua`:
+
+```bash
+make format
+```
+
+Lint Lua sources with `luacheck`:
+
+```bash
+make lint
+```
+
 ## License
 
 MIT

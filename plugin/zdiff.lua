@@ -22,7 +22,8 @@ local function complete_git_refs(arg_lead, _, _)
   end
 
   -- Remote branches (without origin/ prefix for convenience)
-  local remote_branches = vim.fn.systemlist("git branch -r --format='%(refname:short)' 2>/dev/null")
+  local remote_branches =
+    vim.fn.systemlist("git branch -r --format='%(refname:short)' 2>/dev/null")
   if vim.v.shell_error == 0 then
     for _, branch in ipairs(remote_branches) do
       -- Strip origin/ prefix for easier typing

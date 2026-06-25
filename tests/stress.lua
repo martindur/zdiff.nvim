@@ -103,10 +103,26 @@ end
 
 local function build_load_repo(repo)
   local scenarios = {
-    { ext = "lua", name = "lua", template = "local function fn_%d(x)\n  if x > 0 then\n    return x + %d\n  end\n  return 0\nend\n" },
-    { ext = "py", name = "python", template = "def fn_%d(x):\n    if x > 0:\n        return x + %d\n    return 0\n" },
-    { ext = "js", name = "javascript", template = "function fn_%d(x) {\n  if (x > 0) {\n    return x + %d;\n  }\n  return 0;\n}\n" },
-    { ext = "go", name = "go", template = "func fn%d(x int) int {\n\tif x > 0 {\n\t\treturn x + %d\n\t}\n\treturn 0\n}\n" },
+    {
+      ext = "lua",
+      name = "lua",
+      template = "local function fn_%d(x)\n  if x > 0 then\n    return x + %d\n  end\n  return 0\nend\n",
+    },
+    {
+      ext = "py",
+      name = "python",
+      template = "def fn_%d(x):\n    if x > 0:\n        return x + %d\n    return 0\n",
+    },
+    {
+      ext = "js",
+      name = "javascript",
+      template = "function fn_%d(x) {\n  if (x > 0) {\n    return x + %d;\n  }\n  return 0;\n}\n",
+    },
+    {
+      ext = "go",
+      name = "go",
+      template = "func fn%d(x int) int {\n\tif x > 0 {\n\t\treturn x + %d\n\t}\n\treturn 0\n}\n",
+    },
   }
 
   for _, scenario in ipairs(scenarios) do
@@ -146,12 +162,16 @@ function M.run()
   run_sync("git add . && git commit -m 'baseline'", repo)
 
   -- Create a second commit so HEAD~1 is always valid.
-  write_file(string.format("%s/src/mod_00/file_001.txt", repo), { "second commit line", "keep" })
+  write_file(
+    string.format("%s/src/mod_00/file_001.txt", repo),
+    { "second commit line", "keep" }
+  )
   run_sync("git add . && git commit -m 'second commit'", repo)
 
   -- Create a heavy working tree diff.
   for i = 1, file_count do
-    local path = string.format("%s/src/mod_%02d/file_%03d.txt", repo, math.floor((i - 1) / 10), i)
+    local path =
+      string.format("%s/src/mod_%02d/file_%03d.txt", repo, math.floor((i - 1) / 10), i)
     local f = assert(io.open(path, "a"))
     for j = 1, 20 do
       f:write(string.format("added line %d for file %d\n", j, i))
@@ -242,12 +262,18 @@ function M.run()
   local timings_uncommitted = {}
   local timings_ref = {}
   for _ = 1, rounds do
-    table.insert(timings_uncommitted, benchmark_open_ms(function()
-      zdiff.open()
-    end, 20000))
-    table.insert(timings_ref, benchmark_open_ms(function()
-      zdiff.open("HEAD~1")
-    end, 20000))
+    table.insert(
+      timings_uncommitted,
+      benchmark_open_ms(function()
+        zdiff.open()
+      end, 20000)
+    )
+    table.insert(
+      timings_ref,
+      benchmark_open_ms(function()
+        zdiff.open("HEAD~1")
+      end, 20000)
+    )
     collectgarbage("collect")
   end
 

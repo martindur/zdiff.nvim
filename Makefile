@@ -1,4 +1,4 @@
-.PHONY: test test-file stress-test syntax-gallery syntax-gallery-clean lint
+.PHONY: test test-file stress-test syntax-gallery syntax-gallery-clean format lint
 
 test:
 	nvim --headless -u tests/minimal_init.lua -c "PlenaryBustedDirectory tests/ {minimal_init = 'tests/minimal_init.lua', sequential = true}"
@@ -16,6 +16,8 @@ syntax-gallery:
 syntax-gallery-clean:
 	nvim -u tests/minimal_init.lua -c "lua require('tests.syntax_gallery').open()"
 
-# Lint with luacheck (if installed)
+format:
+	stylua lua/ plugin/ tests/
+
 lint:
-	luacheck lua/ --no-unused-args --no-max-line-length
+	luacheck lua/ --globals vim --no-unused-args --no-max-line-length
