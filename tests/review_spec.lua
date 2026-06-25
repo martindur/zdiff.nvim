@@ -1,4 +1,5 @@
 local review = require("zdiff.review")
+local patch = require("zdiff.patch")
 
 local function run_git(repo, args)
   local argv = { "git", "-C", repo }
@@ -22,6 +23,25 @@ local function wait_for_loaded()
     return not review._debug_state().loading
   end, 20)
   assert.is_true(ok, "timed out waiting for review PRs to load")
+end
+
+local function get_normal_keymap(buf, lhs)
+  for _, km in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+    if km.lhs == lhs then
+      return km
+    end
+  end
+  return nil
+end
+
+local function find_line(text)
+  local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+  for i, line in ipairs(lines) do
+    if line:find(text, 1, true) then
+      return i
+    end
+  end
+  return nil
 end
 
 describe("zdiff.review", function()
@@ -96,5 +116,58 @@ describe("zdiff.review", function()
 
     local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
     assert.is_truthy(content:find("Error loading pull requests: gh not found", 1, true))
+  end)
+
+  it("opens a selected pull request diff", function()
+    review._set_backend({
+      list_prs = function(_, done)
+        done({
+          ok = true,
+          data = {
+            {
+              number = 12,
+              title = "Add review browser",
+              author = "dur",
+              additions = 1,
+              deletions = 1,
+              review_decision = "",
+              is_draft = false,
+            },
+          },
+        })
+      end,
+      diff_pr = function(_, number, done)
+        assert.equals(12, number)
+        done({
+          ok = true,
+          data = patch.parse({
+            "diff --git a/a.txt b/a.txt",
+            "--- a/a.txt",
+            "+++ b/a.txt",
+            "@@ -1,2 +1,2 @@",
+            " same",
+            "-old",
+            "+new",
+          }),
+        })
+      end,
+    })
+
+    review.open()
+    wait_for_loaded()
+
+    local open_keymap = get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>")
+    assert.is_not_nil(open_keymap)
+    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
+    open_keymap.callback()
+    wait_for_loaded()
+
+    local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+    assert.equals("diff", review._debug_state().view)
+    assert.equals(1, review._debug_state().file_count)
+    assert.is_truthy(content:find("PR #12 Add review browser", 1, true))
+    assert.is_truthy(content:find("a.txt", 1, true))
+    assert.is_truthy(content:find("-old", 1, true))
+    assert.is_truthy(content:find("+new", 1, true))
   end)
 end)

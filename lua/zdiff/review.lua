@@ -1,5 +1,6 @@
 local M = {}
 local git = require("zdiff.git")
+local patch = require("zdiff.patch")
 
 ---@class ZdiffReviewPr
 ---@field number number
@@ -14,7 +15,10 @@ local git = require("zdiff.git")
 ---@field buf number|nil
 ---@field win number|nil
 ---@field root string|nil
+---@field view "list"|"diff"
 ---@field prs ZdiffReviewPr[]
+---@field files ZdiffPatchFile[]
+---@field active_pr ZdiffReviewPr|nil
 ---@field line_map table<number, number>
 ---@field loading boolean
 ---@field load_error string|nil
@@ -26,7 +30,10 @@ local state = {
   buf = nil,
   win = nil,
   root = nil,
+  view = "list",
   prs = {},
+  files = {},
+  active_pr = nil,
   line_map = {},
   loading = false,
   load_error = nil,
@@ -112,6 +119,20 @@ local function run_async(root, argv, callback)
   end
 end
 
+---@param text string
+---@return string[]
+local function split_lines(text)
+  if text == "" then
+    return {}
+  end
+
+  local lines = vim.split(text, "\n", { plain = true })
+  if #lines > 0 and lines[#lines] == "" then
+    table.remove(lines, #lines)
+  end
+  return lines
+end
+
 ---@param raw table
 ---@return ZdiffReviewPr
 local function normalize_pr(raw)
@@ -160,8 +181,22 @@ local function list_github_prs(root, done)
   end)
 end
 
+---@param root string
+---@param number number
+---@param done fun(result: {ok: boolean, data?: ZdiffPatchFile[], error?: string})
+local function diff_github_pr(root, number, done)
+  run_async(root, { "gh", "pr", "diff", tostring(number), "--patch" }, function(result)
+    if not result.ok then
+      done({ ok = false, error = result.error })
+      return
+    end
+    done({ ok = true, data = patch.parse(split_lines(result.stdout)) })
+  end)
+end
+
 local default_backend = {
   list_prs = list_github_prs,
+  diff_pr = diff_github_pr,
 }
 
 ---@return table
@@ -198,17 +233,9 @@ local function format_pr(pr)
   )
 end
 
-local function render()
-  if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
-    return
-  end
-
-  vim.bo[state.buf].modifiable = true
-  vim.api.nvim_buf_clear_namespace(state.buf, ns, 0, -1)
-  state.line_map = {}
-
-  local lines = {}
-  local highlights = {}
+---@param lines string[]
+---@param highlights table[]
+local function render_list(lines, highlights)
   local title = " zdiff.review: Pull requests"
   if state.loading then
     title = title .. " (loading...)"
@@ -247,6 +274,127 @@ local function render()
       table.insert(highlights, { #lines, "DiffDelete", del_start, del_end })
     end
   end
+end
+
+---@param status string
+---@return string
+local function status_icon(status)
+  if status == "A" then
+    return "+"
+  elseif status == "D" then
+    return "-"
+  else
+    return "~"
+  end
+end
+
+---@param line_type "context"|"add"|"del"|"header"
+---@return string
+local function line_highlight(line_type)
+  if line_type == "add" then
+    return "DiffAdd"
+  elseif line_type == "del" then
+    return "DiffDelete"
+  elseif line_type == "header" then
+    return "Title"
+  end
+  return "Normal"
+end
+
+---@param lines string[]
+---@param highlights table[]
+local function render_diff(lines, highlights)
+  local pr = state.active_pr
+  local title = " zdiff.review: PR diff"
+  if pr then
+    title = string.format(" zdiff.review: PR #%d %s", pr.number, pr.title)
+  end
+  if state.loading then
+    title = title .. " (loading...)"
+  end
+
+  table.insert(lines, title)
+  table.insert(lines, string.rep("-", 60))
+  table.insert(highlights, { #lines - 1, "Title", 0, -1 })
+  table.insert(highlights, { #lines, "Comment", 0, -1 })
+
+  if #state.files == 0 then
+    table.insert(lines, "")
+    if state.load_error then
+      table.insert(lines, "  Error loading PR diff: " .. state.load_error)
+    elseif state.loading then
+      table.insert(lines, "  Loading PR diff...")
+    else
+      table.insert(lines, "  No diff found")
+    end
+    table.insert(highlights, { #lines, "Comment", 0, -1 })
+    return
+  end
+
+  for _, file in ipairs(state.files) do
+    local add_stat = "+" .. file.insertions
+    local del_stat = "-" .. file.deletions
+    local file_line = string.format(
+      "%s %s  %s %s",
+      status_icon(file.status),
+      file.display_path or file.path,
+      add_stat,
+      del_stat
+    )
+    table.insert(lines, file_line)
+
+    local add_start = #file_line - #add_stat - #del_stat - 1
+    local add_end = add_start + #add_stat
+    local del_start = add_end + 1
+    local del_end = del_start + #del_stat
+    table.insert(highlights, { #lines, "Directory", 0, add_start })
+    table.insert(highlights, { #lines, "DiffAdd", add_start, add_end })
+    table.insert(highlights, { #lines, "DiffDelete", del_start, del_end })
+
+    for _, hunk in ipairs(file.hunks) do
+      table.insert(
+        lines,
+        string.format(
+          "  @@ -%d,%d +%d,%d @@",
+          hunk.old_start,
+          hunk.old_count,
+          hunk.new_start,
+          hunk.new_count
+        )
+      )
+      table.insert(highlights, { #lines, "Comment", 0, -1 })
+
+      for _, diff_line in ipairs(hunk.lines) do
+        local marker = " "
+        if diff_line.type == "add" then
+          marker = "+"
+        elseif diff_line.type == "del" then
+          marker = "-"
+        end
+
+        table.insert(lines, "  " .. marker .. diff_line.text)
+        table.insert(highlights, { #lines, line_highlight(diff_line.type), 0, -1 })
+      end
+    end
+  end
+end
+
+local function render()
+  if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
+    return
+  end
+
+  vim.bo[state.buf].modifiable = true
+  vim.api.nvim_buf_clear_namespace(state.buf, ns, 0, -1)
+  state.line_map = {}
+
+  local lines = {}
+  local highlights = {}
+  if state.view == "diff" then
+    render_diff(lines, highlights)
+  else
+    render_list(lines, highlights)
+  end
 
   vim.api.nvim_buf_set_lines(state.buf, 0, -1, false, lines)
   for _, hl in ipairs(highlights) do
@@ -255,7 +403,8 @@ local function render()
   vim.bo[state.buf].modifiable = false
 end
 
-local function refresh()
+---@param pr ZdiffReviewPr
+local function load_pr_diff(pr)
   if not state.root then
     state.load_error = "no git repository root for current session"
     state.loading = false
@@ -265,6 +414,43 @@ local function refresh()
 
   state.refresh_seq = state.refresh_seq + 1
   local refresh_seq = state.refresh_seq
+  state.view = "diff"
+  state.active_pr = pr
+  state.files = {}
+  state.loading = true
+  state.load_error = nil
+  render()
+
+  backend().diff_pr(state.root, pr.number, function(result)
+    if refresh_seq ~= state.refresh_seq then
+      return
+    end
+
+    if result.ok then
+      state.files = result.data or {}
+      state.load_error = nil
+    else
+      state.files = {}
+      state.load_error = render_error(result.error)
+    end
+    state.loading = false
+    render()
+  end)
+end
+
+local function refresh_list()
+  if not state.root then
+    state.load_error = "no git repository root for current session"
+    state.loading = false
+    render()
+    return
+  end
+
+  state.refresh_seq = state.refresh_seq + 1
+  local refresh_seq = state.refresh_seq
+  state.view = "list"
+  state.active_pr = nil
+  state.files = {}
   state.loading = true
   state.load_error = nil
   render()
@@ -286,6 +472,27 @@ local function refresh()
   end)
 end
 
+local function refresh()
+  if state.view == "diff" and state.active_pr then
+    load_pr_diff(state.active_pr)
+  else
+    refresh_list()
+  end
+end
+
+local function open_selected_pr()
+  if not state.win or not vim.api.nvim_win_is_valid(state.win) then
+    return
+  end
+
+  local cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
+  local pr_idx = state.line_map[cursor_line]
+  local pr = pr_idx and state.prs[pr_idx]
+  if pr then
+    load_pr_diff(pr)
+  end
+end
+
 local function close()
   state.refresh_seq = state.refresh_seq + 1
   if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
@@ -294,7 +501,10 @@ local function close()
   state.buf = nil
   state.win = nil
   state.root = nil
+  state.view = "list"
   state.prs = {}
+  state.files = {}
+  state.active_pr = nil
   state.line_map = {}
   state.loading = false
   state.load_error = nil
@@ -318,6 +528,9 @@ function M.open()
   end
 
   state.root = root
+  state.view = "list"
+  state.active_pr = nil
+  state.files = {}
   state.buf = vim.api.nvim_create_buf(false, true)
   vim.bo[state.buf].buftype = "nofile"
   vim.bo[state.buf].bufhidden = "hide"
@@ -329,9 +542,10 @@ function M.open()
   vim.api.nvim_win_set_buf(state.win, state.buf)
 
   vim.keymap.set("n", "q", close, { buffer = state.buf, silent = true })
+  vim.keymap.set("n", "<CR>", open_selected_pr, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "R", refresh, { buffer = state.buf, silent = true })
 
-  refresh()
+  refresh_list()
 end
 
 function M.setup()
@@ -353,7 +567,9 @@ function M._debug_state()
   return {
     loading = state.loading,
     load_error = state.load_error,
+    view = state.view,
     pr_count = #state.prs,
+    file_count = #state.files,
     root = state.root,
   }
 end
