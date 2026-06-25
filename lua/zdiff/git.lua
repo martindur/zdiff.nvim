@@ -178,9 +178,7 @@ local function build_file(status, path, old_path, new_path, insertions, deletion
   elseif status == "D" then
     old_path = old_path or path
     new_path = nil
-  elseif status == "R" or status == "C" then
-    -- Keep old_path/new_path as provided by Git.
-  else
+  elseif status ~= "R" and status ~= "C" then
     old_path = old_path or path
     new_path = new_path or path
   end
