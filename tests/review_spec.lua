@@ -170,4 +170,63 @@ describe("zdiff.review", function()
     assert.is_truthy(content:find("-old", 1, true))
     assert.is_truthy(content:find("+new", 1, true))
   end)
+
+  it("adds a local draft comment on a diff line", function()
+    review._set_backend({
+      list_prs = function(_, done)
+        done({
+          ok = true,
+          data = {
+            {
+              number = 12,
+              title = "Add review browser",
+              author = "dur",
+              additions = 1,
+              deletions = 1,
+              review_decision = "",
+              is_draft = false,
+            },
+          },
+        })
+      end,
+      diff_pr = function(_, _, done)
+        done({
+          ok = true,
+          data = patch.parse({
+            "diff --git a/a.txt b/a.txt",
+            "--- a/a.txt",
+            "+++ b/a.txt",
+            "@@ -1,2 +1,2 @@",
+            " same",
+            "-old",
+            "+new",
+          }),
+        })
+      end,
+    })
+
+    review.open()
+    wait_for_loaded()
+    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
+    get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+    wait_for_loaded()
+
+    local old_input = vim.ui.input
+    vim.ui.input = function(opts, on_confirm)
+      assert.equals("Comment: ", opts.prompt)
+      assert.equals("", opts.default)
+      on_confirm("Needs follow-up")
+    end
+
+    local ok, err = pcall(function()
+      vim.api.nvim_win_set_cursor(0, { assert(find_line("+new")), 0 })
+      get_normal_keymap(vim.api.nvim_get_current_buf(), "c").callback()
+    end)
+    vim.ui.input = old_input
+
+    assert.is_true(ok, err)
+    local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+    assert.equals(1, review._debug_state().draft_count)
+    assert.is_truthy(content:find("# Needs follow-up", 1, true))
+  end)
 end)

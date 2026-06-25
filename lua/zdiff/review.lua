@@ -19,7 +19,8 @@ local patch = require("zdiff.patch")
 ---@field prs ZdiffReviewPr[]
 ---@field files ZdiffPatchFile[]
 ---@field active_pr ZdiffReviewPr|nil
----@field line_map table<number, number>
+---@field line_map table<number, number|ZdiffReviewCommentTarget>
+---@field drafts table<string, string>
 ---@field loading boolean
 ---@field load_error string|nil
 ---@field refresh_seq number
@@ -35,6 +36,7 @@ local state = {
   files = {},
   active_pr = nil,
   line_map = {},
+  drafts = {},
   loading = false,
   load_error = nil,
   refresh_seq = 0,
@@ -42,6 +44,12 @@ local state = {
 }
 
 local ns = vim.api.nvim_create_namespace("zdiff_review")
+
+---@class ZdiffReviewCommentTarget
+---@field pr_number number
+---@field path string
+---@field side "LEFT"|"RIGHT"
+---@field line number
 
 local function notify(msg, level)
   vim.notify("[zdiff.review] " .. msg, level or vim.log.levels.INFO)
@@ -301,6 +309,47 @@ local function line_highlight(line_type)
   return "Normal"
 end
 
+---@param target ZdiffReviewCommentTarget
+---@return string
+local function draft_key(target)
+  return table.concat({
+    tostring(target.pr_number),
+    target.path,
+    target.side,
+    tostring(target.line),
+  }, "\0")
+end
+
+---@param file ZdiffPatchFile
+---@param diff_line ZdiffLine
+---@return ZdiffReviewCommentTarget|nil
+local function comment_target(file, diff_line)
+  local pr = state.active_pr
+  if not pr then
+    return nil
+  end
+
+  if diff_line.type == "del" and diff_line.old_lnum then
+    return {
+      pr_number = pr.number,
+      path = file.old_path or file.path,
+      side = "LEFT",
+      line = diff_line.old_lnum,
+    }
+  end
+
+  if diff_line.new_lnum then
+    return {
+      pr_number = pr.number,
+      path = file.new_path or file.path,
+      side = "RIGHT",
+      line = diff_line.new_lnum,
+    }
+  end
+
+  return nil
+end
+
 ---@param lines string[]
 ---@param highlights table[]
 local function render_diff(lines, highlights)
@@ -374,6 +423,16 @@ local function render_diff(lines, highlights)
 
         table.insert(lines, "  " .. marker .. diff_line.text)
         table.insert(highlights, { #lines, line_highlight(diff_line.type), 0, -1 })
+
+        local target = comment_target(file, diff_line)
+        if target then
+          state.line_map[#lines] = target
+          local draft = state.drafts[draft_key(target)]
+          if draft then
+            table.insert(lines, "    # " .. draft)
+            table.insert(highlights, { #lines, "Comment", 0, -1 })
+          end
+        end
       end
     end
   end
@@ -487,10 +546,47 @@ local function open_selected_pr()
 
   local cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
   local pr_idx = state.line_map[cursor_line]
-  local pr = pr_idx and state.prs[pr_idx]
+  if type(pr_idx) ~= "number" then
+    return
+  end
+
+  local pr = state.prs[pr_idx]
   if pr then
     load_pr_diff(pr)
   end
+end
+
+local function edit_draft_comment()
+  if
+    state.view ~= "diff"
+    or not state.win
+    or not vim.api.nvim_win_is_valid(state.win)
+  then
+    return
+  end
+
+  local cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
+  local target = state.line_map[cursor_line]
+  if type(target) ~= "table" then
+    notify("No reviewable line under cursor", vim.log.levels.WARN)
+    return
+  end
+
+  local key = draft_key(target)
+  vim.ui.input(
+    { prompt = "Comment: ", default = state.drafts[key] or "" },
+    function(input)
+      if input == nil then
+        return
+      end
+      if input == "" then
+        state.drafts[key] = nil
+      else
+        state.drafts[key] = input
+      end
+      render()
+    end
+  )
 end
 
 local function close()
@@ -506,6 +602,7 @@ local function close()
   state.files = {}
   state.active_pr = nil
   state.line_map = {}
+  state.drafts = {}
   state.loading = false
   state.load_error = nil
 end
@@ -531,6 +628,7 @@ function M.open()
   state.view = "list"
   state.active_pr = nil
   state.files = {}
+  state.drafts = {}
   state.buf = vim.api.nvim_create_buf(false, true)
   vim.bo[state.buf].buftype = "nofile"
   vim.bo[state.buf].bufhidden = "hide"
@@ -543,6 +641,7 @@ function M.open()
 
   vim.keymap.set("n", "q", close, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "<CR>", open_selected_pr, { buffer = state.buf, silent = true })
+  vim.keymap.set("n", "c", edit_draft_comment, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "R", refresh, { buffer = state.buf, silent = true })
 
   refresh_list()
@@ -570,6 +669,7 @@ function M._debug_state()
     view = state.view,
     pr_count = #state.prs,
     file_count = #state.files,
+    draft_count = vim.tbl_count(state.drafts),
     root = state.root,
   }
 end
