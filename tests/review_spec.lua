@@ -230,7 +230,7 @@ describe("zdiff.review", function()
     assert.is_truthy(content:find("# Needs follow-up", 1, true))
   end)
 
-  it("submits draft comments through the backend", function()
+  it("posts the current line draft comment through the backend", function()
     local submitted = nil
     review._set_backend({
       list_prs = function(_, done)
@@ -263,8 +263,8 @@ describe("zdiff.review", function()
           }),
         })
       end,
-      submit_review = function(_, number, payload, done)
-        submitted = { number = number, payload = payload }
+      submit_comment = function(_, number, comment, done)
+        submitted = { number = number, comment = comment }
         done({ ok = true })
       end,
     })
@@ -283,19 +283,16 @@ describe("zdiff.review", function()
     local ok, err = pcall(function()
       vim.api.nvim_win_set_cursor(0, { assert(find_line("+new")), 0 })
       get_normal_keymap(vim.api.nvim_get_current_buf(), "c").callback()
-      get_normal_keymap(vim.api.nvim_get_current_buf(), "S").callback()
+      get_normal_keymap(vim.api.nvim_get_current_buf(), "p").callback()
     end)
     vim.ui.input = old_input
 
     assert.is_true(ok, err)
     assert.equals(12, submitted.number)
-    assert.equals("COMMENT", submitted.payload.event)
-    assert.equals("", submitted.payload.body)
-    assert.equals(1, #submitted.payload.comments)
-    assert.equals("a.txt", submitted.payload.comments[1].path)
-    assert.equals("RIGHT", submitted.payload.comments[1].side)
-    assert.equals(2, submitted.payload.comments[1].line)
-    assert.equals("Needs follow-up", submitted.payload.comments[1].body)
+    assert.equals("a.txt", submitted.comment.path)
+    assert.equals("RIGHT", submitted.comment.side)
+    assert.equals(2, submitted.comment.line)
+    assert.equals("Needs follow-up", submitted.comment.body)
     assert.equals(0, review._debug_state().draft_count)
   end)
 end)
