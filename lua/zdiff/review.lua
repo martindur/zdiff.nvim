@@ -70,6 +70,7 @@ local render
 local ns_diff = vim.api.nvim_create_namespace("zdiff_review")
 local ns_syntax = vim.api.nvim_create_namespace("zdiff_review_syntax")
 local ns_markers = vim.api.nvim_create_namespace("zdiff_review_markers")
+vim.api.nvim_set_hl(0, "ZdiffReviewThread", { link = "DiagnosticWarn" })
 local icons = {
   collapsed = "",
   expanded = "",
@@ -878,6 +879,7 @@ local function file_summary_rows(ctx)
   return {
     {
       text = text,
+      hl_group = "ZdiffReviewThread",
       map = { kind = "review_thread_summary", file_idx = ctx.file_idx },
     },
   }
@@ -973,7 +975,7 @@ local function comment_rows(ctx)
   local rows = {}
   local key = target_key(target)
   if state.posting[key] then
-    table.insert(rows, { text = "    # Posting..." })
+    table.insert(rows, { text = "    Posting...", hl_group = "ZdiffReviewThread" })
   end
 
   for _, comment in ipairs(state.comments[key] or {}) do
@@ -982,6 +984,7 @@ local function comment_rows(ctx)
     local indent = comment.in_reply_to_id and "      " or "    "
     local row = {
       text = indent .. prefix .. comment.body,
+      hl_group = "ZdiffReviewThread",
     }
     if comment.id and not comment.in_reply_to_id then
       row.map = {
@@ -997,7 +1000,7 @@ local function comment_rows(ctx)
       and not comment.in_reply_to_id
       and state.posting[reply_key(comment)]
     then
-      table.insert(rows, { text = "      # Replying..." })
+      table.insert(rows, { text = "      Replying...", hl_group = "ZdiffReviewThread" })
     end
   end
 
