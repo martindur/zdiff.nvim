@@ -19,8 +19,7 @@ local patch = require("zdiff.patch")
 ---@field prs ZdiffReviewPr[]
 ---@field files ZdiffPatchFile[]
 ---@field active_pr ZdiffReviewPr|nil
----@field line_map table<number, number|ZdiffReviewCommentTarget>
----@field drafts table<string, string>
+---@field line_map table<number, number|ZdiffReviewCommentTarget|ZdiffReviewPostedComment>
 ---@field comments table<string, ZdiffReviewPostedComment[]>
 ---@field posting table<string, boolean>
 ---@field loading boolean
@@ -40,7 +39,6 @@ local state = {
   files = {},
   active_pr = nil,
   line_map = {},
-  drafts = {},
   comments = {},
   posting = {},
   loading = false,
@@ -66,6 +64,8 @@ local ns = vim.api.nvim_create_namespace("zdiff_review")
 ---@field body string
 
 ---@class ZdiffReviewPostedComment
+---@field id number|nil
+---@field in_reply_to_id number|nil
 ---@field path string
 ---@field side "LEFT"|"RIGHT"
 ---@field line number
@@ -238,6 +238,8 @@ local function normalize_comment(raw)
   end
 
   return {
+    id = tonumber(raw.id),
+    in_reply_to_id = tonumber(raw.in_reply_to_id),
     path = raw.path,
     side = raw.side == "LEFT" and "LEFT" or "RIGHT",
     line = line,
@@ -332,11 +334,38 @@ local function submit_github_comment(root, number, comment, done)
   end)
 end
 
+---@param root string
+---@param number number
+---@param comment_id number
+---@param body string
+---@param done fun(result: {ok: boolean, error?: string})
+local function submit_github_reply(root, number, comment_id, body, done)
+  run_async(root, {
+    "gh",
+    "api",
+    "--method",
+    "POST",
+    "repos/{owner}/{repo}/pulls/" .. tostring(number) .. "/comments/" .. tostring(comment_id) .. "/replies",
+    "-H",
+    "Accept: application/vnd.github+json",
+    "-f",
+    "body=" .. body,
+    "--silent",
+  }, function(api_result)
+    if not api_result.ok then
+      done({ ok = false, error = api_result.error })
+      return
+    end
+    done({ ok = true })
+  end)
+end
+
 local default_backend = {
   list_prs = list_github_prs,
   diff_pr = diff_github_pr,
   list_comments = list_github_comments,
   submit_comment = submit_github_comment,
+  reply_comment = submit_github_reply,
 }
 
 ---@return table
@@ -452,8 +481,6 @@ local function target_key(target)
   }, "\0")
 end
 
-local draft_key = target_key
-
 ---@param pr_number number
 ---@param comment ZdiffReviewPostedComment
 ---@return string
@@ -464,6 +491,12 @@ local function comment_key(pr_number, comment)
     side = comment.side,
     line = comment.line,
   })
+end
+
+---@param comment ZdiffReviewPostedComment
+---@return string
+local function reply_key(comment)
+  return "reply\0" .. tostring(comment.id)
 end
 
 ---@param file ZdiffPatchFile
@@ -579,20 +612,24 @@ local function render_diff(lines, highlights)
         local target = comment_target(file, diff_line)
         if target then
           state.line_map[#lines] = target
-          local key = draft_key(target)
-          local draft = state.drafts[key]
-          if draft then
-            table.insert(lines, "    # " .. draft)
-            table.insert(highlights, { #lines, "Comment", 0, -1 })
-          end
+          local key = target_key(target)
           if state.posting[key] then
             table.insert(lines, "    # Posting...")
             table.insert(highlights, { #lines, "Comment", 0, -1 })
           end
           for _, comment in ipairs(state.comments[key] or {}) do
-            local prefix = comment.author ~= "" and ("@" .. comment.author .. ": ") or ""
-            table.insert(lines, "    " .. prefix .. comment.body)
+            local author = comment.author or ""
+            local prefix = author ~= "" and ("@" .. author .. ": ") or ""
+            local indent = comment.in_reply_to_id and "      " or "    "
+            table.insert(lines, indent .. prefix .. comment.body)
             table.insert(highlights, { #lines, "Comment", 0, -1 })
+            if comment.id and not comment.in_reply_to_id then
+              state.line_map[#lines] = comment
+              if state.posting[reply_key(comment)] then
+                table.insert(lines, "      # Replying...")
+                table.insert(highlights, { #lines, "Comment", 0, -1 })
+              end
+            end
           end
         end
       end
@@ -758,84 +795,34 @@ local function open_selected_pr()
   end
 end
 
-local function edit_draft_comment()
-  if
-    state.view ~= "diff"
-    or not state.win
-    or not vim.api.nvim_win_is_valid(state.win)
-  then
-    return
-  end
-
-  local cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
-  local target = state.line_map[cursor_line]
-  if type(target) ~= "table" then
-    notify("No reviewable line under cursor", vim.log.levels.WARN)
-    return
-  end
-
-  local key = draft_key(target)
-  vim.ui.input(
-    { prompt = "Comment: ", default = state.drafts[key] or "" },
-    function(input)
-      if input == nil then
-        return
-      end
-      if input == "" then
-        state.drafts[key] = nil
-      else
-        state.drafts[key] = input
-      end
-      render()
-    end
-  )
-end
-
-local function post_draft_comment()
+---@param target ZdiffReviewCommentTarget
+---@param body string
+local function post_comment(target, body)
   local pr = state.active_pr
-  if
-    state.view ~= "diff"
-    or not pr
-    or not state.root
-    or not state.win
-    or not vim.api.nvim_win_is_valid(state.win)
-  then
+  local submit_comment = backend().submit_comment
+  if not pr or not state.root or not submit_comment then
+    notify("Comment posting is not supported", vim.log.levels.WARN)
     return
   end
 
-  local cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
-  local target = state.line_map[cursor_line]
-  if type(target) ~= "table" then
-    notify("No reviewable line under cursor", vim.log.levels.WARN)
-    return
-  end
-
-  local key = draft_key(target)
-  local body = state.drafts[key]
-  if not body then
-    notify("No draft comment on this line", vim.log.levels.WARN)
-    return
-  end
+  local key = target_key(target)
   if state.posting[key] then
     notify("Comment is already posting", vim.log.levels.WARN)
     return
   end
 
-  local comment = {
-    path = target.path,
-    side = target.side,
-    line = target.line,
-    body = body,
-  }
-
   state.posting[key] = true
   notify("Posting comment...")
   render()
 
-  backend().submit_comment(state.root, pr.number, comment, function(result)
+  submit_comment(state.root, pr.number, {
+    path = target.path,
+    side = target.side,
+    line = target.line,
+    body = body,
+  }, function(result)
     state.posting[key] = nil
     if result.ok then
-      state.drafts[key] = nil
       notify("Posted comment")
       render()
       load_pr_comments(pr)
@@ -843,6 +830,87 @@ local function post_draft_comment()
       notify(render_error(result.error), vim.log.levels.ERROR)
       render()
     end
+  end)
+end
+
+local function prompt_comment()
+  if
+    state.view ~= "diff"
+    or not state.win
+    or not vim.api.nvim_win_is_valid(state.win)
+  then
+    return
+  end
+
+  local cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
+  local target = state.line_map[cursor_line]
+  if type(target) ~= "table" or not target.pr_number then
+    notify("No reviewable line under cursor", vim.log.levels.WARN)
+    return
+  end
+
+  vim.ui.input({ prompt = "Comment: " }, function(input)
+    if not input or input == "" then
+      return
+    end
+    post_comment(target, input)
+  end)
+end
+
+---@param comment ZdiffReviewPostedComment
+---@param body string
+local function post_reply(comment, body)
+  local pr = state.active_pr
+  local reply_comment = backend().reply_comment
+  if not pr or not state.root or not reply_comment or not comment.id then
+    notify("Comment replies are not supported", vim.log.levels.WARN)
+    return
+  end
+
+  local key = reply_key(comment)
+  if state.posting[key] then
+    notify("Reply is already posting", vim.log.levels.WARN)
+    return
+  end
+
+  state.posting[key] = true
+  notify("Posting reply...")
+  render()
+
+  reply_comment(state.root, pr.number, comment.id, body, function(result)
+    state.posting[key] = nil
+    if result.ok then
+      notify("Posted reply")
+      render()
+      load_pr_comments(pr)
+    else
+      notify(render_error(result.error), vim.log.levels.ERROR)
+      render()
+    end
+  end)
+end
+
+local function prompt_reply()
+  if
+    state.view ~= "diff"
+    or not state.win
+    or not vim.api.nvim_win_is_valid(state.win)
+  then
+    return
+  end
+
+  local cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
+  local comment = state.line_map[cursor_line]
+  if type(comment) ~= "table" or not comment.id or comment.in_reply_to_id then
+    notify("No top-level comment under cursor", vim.log.levels.WARN)
+    return
+  end
+
+  vim.ui.input({ prompt = "Reply: " }, function(input)
+    if not input or input == "" then
+      return
+    end
+    post_reply(comment, input)
   end)
 end
 
@@ -859,7 +927,6 @@ local function close()
   state.files = {}
   state.active_pr = nil
   state.line_map = {}
-  state.drafts = {}
   state.comments = {}
   state.posting = {}
   state.comments_loading = false
@@ -889,7 +956,6 @@ function M.open()
   state.view = "list"
   state.active_pr = nil
   state.files = {}
-  state.drafts = {}
   state.comments = {}
   state.posting = {}
   state.comments_loading = false
@@ -906,8 +972,8 @@ function M.open()
 
   vim.keymap.set("n", "q", close, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "<CR>", open_selected_pr, { buffer = state.buf, silent = true })
-  vim.keymap.set("n", "c", edit_draft_comment, { buffer = state.buf, silent = true })
-  vim.keymap.set("n", "p", post_draft_comment, { buffer = state.buf, silent = true })
+  vim.keymap.set("n", "c", prompt_comment, { buffer = state.buf, silent = true })
+  vim.keymap.set("n", "r", prompt_reply, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "R", refresh, { buffer = state.buf, silent = true })
 
   refresh_list()
@@ -935,7 +1001,6 @@ function M._debug_state()
     view = state.view,
     pr_count = #state.prs,
     file_count = #state.files,
-    draft_count = vim.tbl_count(state.drafts),
     comment_count = vim.tbl_count(state.comments),
     posting_count = vim.tbl_count(state.posting),
     comments_loading = state.comments_loading,
