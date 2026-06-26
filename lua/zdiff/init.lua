@@ -1,8 +1,7 @@
 local M = {}
 local diff = require("zdiff.diff")
-local display = require("zdiff.display")
+local diff_view = require("zdiff.diff_view")
 local git = require("zdiff.git")
-local syntax = require("zdiff.syntax")
 local winbar = require("zdiff.winbar")
 
 -- State
@@ -131,29 +130,6 @@ local function keymap_lhs(name)
     return lhs
   end
   return nil
-end
-
----@param value string
----@param allowed table<string, boolean>
----@param fallback string
----@return string
-local function normalize_enum(value, allowed, fallback)
-  if type(value) ~= "string" then
-    return fallback
-  end
-  if allowed[value] then
-    return value
-  end
-  return fallback
-end
-
----@param value any
----@return number
-local function normalize_non_negative_number(value)
-  if type(value) ~= "number" or value < 0 then
-    return 0
-  end
-  return math.floor(value)
 end
 
 ---@param win number
@@ -322,20 +298,6 @@ local function queue_file_hunks(file_idx, file)
   end)
 end
 
----Get the status icon for a file
----@param status string
----@return string
-local function get_status_icon(status)
-  return display.get_status_icon(status, M.config.icons)
-end
-
----Get highlight group for diff line type
----@param line_type "context"|"add"|"del"|"header"
----@return string
-local function get_line_highlight(line_type)
-  return display.get_line_highlight(line_type)
-end
-
 ---@param filepath string
 ---@return string[]
 local function read_worktree_lines(filepath)
@@ -423,109 +385,20 @@ local function get_projection_sources_async(file, done)
   end)
 end
 
----@param code string[]
----@param lang string
----@return table<number, table[]>
-local function build_syntax_line_map(code, lang)
-  local mapped = {}
-  local captures = syntax.get_highlights(code, lang)
-  for _, cap in ipairs(captures) do
-    mapped[cap.line] = mapped[cap.line] or {}
-    table.insert(mapped[cap.line], {
-      hl_group = cap.hl_group,
-      col_start = cap.col_start,
-      col_end = cap.col_end,
-    })
-  end
-  return mapped
-end
-
----@param old_lines string[]
----@param new_lines string[]
----@param lang string
----@return {old: table<number, table[]>, new: table<number, table[]>}|nil
-local function build_projection_cache(old_lines, new_lines, lang)
-  local syntax_cfg = M.config.syntax or {}
-  local max_lines = normalize_non_negative_number(syntax_cfg.max_lines)
-  if max_lines > 0 and (#old_lines > max_lines or #new_lines > max_lines) then
-    return nil
-  end
-
-  return {
-    old = build_syntax_line_map(old_lines, lang),
-    new = build_syntax_line_map(new_lines, lang),
-  }
-end
-
----@param file ZdiffFile
----@return string
-local function get_syntax_cache_key(file)
-  local pieces = {
-    state.root or "",
-    state.base_ref or "",
-    file.path,
-    file.display_path or "",
-    file.old_path or "",
-    file.new_path or "",
-    file.status,
-    tostring(file.insertions),
-    tostring(file.deletions),
-    tostring(#file.hunks),
-  }
-  for _, hunk in ipairs(file.hunks) do
-    table.insert(
-      pieces,
-      string.format(
-        "%d:%d:%d:%d:%d",
-        hunk.old_start,
-        hunk.old_count,
-        hunk.new_start,
-        hunk.new_count,
-        #hunk.lines
-      )
-    )
-    for _, line in ipairs(hunk.lines) do
-      table.insert(pieces, line.type .. ":" .. line.text)
-    end
-  end
-  local raw = table.concat(pieces, "\n")
-  local ok, hash = pcall(vim.fn.sha256, raw)
-  if ok and hash and hash ~= "" then
-    return hash
-  end
-  return raw
-end
-
 ---@param key string
 ---@param file ZdiffFile
 ---@param lang string
 local function queue_projection_cache(key, file, lang)
-  if state.syntax_projection_cache[key] or state.syntax_jobs[key] then
-    return
-  end
-
-  state.syntax_job_seq = state.syntax_job_seq + 1
-  local token = state.syntax_job_seq
-  state.syntax_jobs[key] = token
-  local refresh_seq = state.refresh_seq
-
-  local function finish(cache)
-    if state.syntax_jobs[key] ~= token then
-      return
-    end
-    state.syntax_jobs[key] = nil
-    if refresh_seq ~= state.refresh_seq then
-      return
-    end
-    state.syntax_projection_cache[key] = cache or false
-    if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
-      render_debounced()
-    end
-  end
-
-  get_projection_sources_async(file, function(old_lines, new_lines)
-    finish(build_projection_cache(old_lines, new_lines, lang))
-  end)
+  diff_view.queue_projection_cache(state, { key = key, file = file, lang = lang }, {
+    syntax = M.config.syntax,
+    refresh_seq = state.refresh_seq,
+    load_sources = get_projection_sources_async,
+    on_done = function()
+      if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
+        render_debounced()
+      end
+    end,
+  })
 end
 
 ---Render the zdiff buffer
@@ -538,15 +411,21 @@ render = function()
 
   local lines = {}
   local highlights = {} -- {line_idx, hl_group, col_start, col_end}
-  local syntax_highlights = {} -- collected after we know line positions
-  local syntax_requests = {}
-  local syntax_cfg = M.config.syntax or {}
-  local syntax_mode =
-    normalize_enum(syntax_cfg.mode, { projection = true, hunk = true }, "projection")
-  local markers = {} -- {line_idx, text, hl_group}
-  state.line_map = {}
-  state.file_header_lines = {}
-  state.syntax_debug = {
+  local rendered = {
+    lines = lines,
+    highlights = highlights,
+    syntax_highlights = {},
+    syntax_requests = {},
+    markers = {},
+    line_map = {},
+    file_header_lines = {},
+    syntax_debug = {
+      projected_files = {},
+      fallback_files = {},
+      skipped_files = {},
+    },
+  }
+  local empty_syntax_debug = {
     projected_files = {},
     fallback_files = {},
     skipped_files = {},
@@ -578,233 +457,36 @@ render = function()
     end
     table.insert(highlights, { #lines, "Comment", 0, -1 })
   else
-    for file_idx, file in ipairs(state.files) do
-      -- File header line
-      local icon = file.expanded and M.config.icons.expanded or M.config.icons.collapsed
-      local file_line = display.format_file_line({
-        icon = icon,
-        status_icon = get_status_icon(file.status),
-        path = file.display_path or file.path,
-        additions = file.insertions,
-        deletions = file.deletions,
-      })
-      table.insert(lines, file_line.text)
-
-      -- Map this line to the file
-      state.line_map[#lines] = { file_idx = file_idx }
-      state.file_header_lines[file_idx] = #lines
-
-      -- Highlight the file path part
-      table.insert(highlights, { #lines, "Directory", 0, file_line.add_start })
-      -- Highlight +N in green
-      table.insert(
-        highlights,
-        { #lines, "DiffAdd", file_line.add_start, file_line.add_end }
-      )
-      -- Highlight -M in red
-      table.insert(
-        highlights,
-        { #lines, "DiffDelete", file_line.del_start, file_line.del_end }
-      )
-
-      -- Show hunks only if expanded
-      if file.expanded then
-        if file.hunk_status == "unloaded" then
-          queue_file_hunks(file_idx, file)
-        end
-
-        if file.hunk_status == "loading" then
-          table.insert(lines, "  Loading diff...")
-          state.line_map[#lines] = { file_idx = file_idx }
-          table.insert(highlights, { #lines, "Comment", 0, -1 })
-        elseif file.hunk_status == "failed" then
-          table.insert(lines, "  Error loading diff: " .. (file.hunk_error or "unknown"))
-          state.line_map[#lines] = { file_idx = file_idx }
-          table.insert(highlights, { #lines, "Comment", 0, -1 })
-        elseif file.hunk_status == "loaded" then
-          -- Get language for syntax highlighting
-          local lang = syntax.get_lang_from_path(file.path)
-
-          -- Collect diff-line mappings for syntax projection and hunk fallback.
-          local code_lines = {}
-          local code_line_mapping = {} -- maps code line index to {buffer_line, prefix_len}
-          local projection_lines = {}
-
-          for hunk_idx, hunk in ipairs(file.hunks) do
-            -- Hunk header
-            local hunk_header = display.format_hunk_header(hunk, "  ")
-            -- Keep git metadata out of buffer text; render as virtual text instead.
-            table.insert(lines, "  ")
-            state.line_map[#lines] = { file_idx = file_idx, hunk_idx = hunk_idx }
-            table.insert(highlights, { #lines, "Comment", 0, -1 })
-            table.insert(markers, { #lines, hunk_header, "Comment" })
-
-            -- Diff lines
-            for line_idx, diff_line in ipairs(hunk.lines) do
-              local prefix = "  "
-              local display_line = prefix .. diff_line.text
-              table.insert(lines, display_line)
-
-              -- Map this line
-              state.line_map[#lines] = {
-                file_idx = file_idx,
-                hunk_idx = hunk_idx,
-                line_idx = line_idx,
-                lnum = diff_line.new_lnum or diff_line.old_lnum,
-              }
-
-              -- Add diff background highlight
-              table.insert(
-                highlights,
-                { #lines, get_line_highlight(diff_line.type), 0, -1 }
-              )
-
-              -- Render +/- markers as virtual text so they are not part of buffer content
-              if diff_line.type == "add" then
-                table.insert(markers, { #lines, " " .. M.config.icons.added, "Comment" })
-              elseif diff_line.type == "del" then
-                table.insert(
-                  markers,
-                  { #lines, " " .. M.config.icons.deleted, "Comment" }
-                )
-              end
-
-              -- Track for syntax highlighting
-              if lang then
-                local source_side = diff_line.type == "del" and "old" or "new"
-                table.insert(projection_lines, {
-                  buffer_line = #lines,
-                  prefix_len = #prefix,
-                  source_side = source_side,
-                  old_lnum = diff_line.old_lnum,
-                  new_lnum = diff_line.new_lnum,
-                })
-
-                table.insert(code_lines, diff_line.text)
-                table.insert(
-                  code_line_mapping,
-                  { buffer_line = #lines, prefix_len = #prefix }
-                )
-              end
-            end
-          end
-
-          -- Apply syntax highlighting if we have a language
-          if lang then
-            local used_projection = false
-            if syntax_mode == "projection" and #projection_lines > 0 then
-              local cache_key = get_syntax_cache_key(file)
-              local projection = state.syntax_projection_cache[cache_key]
-              if projection then
-                for _, line_info in ipairs(projection_lines) do
-                  local side_map = line_info.source_side == "old" and projection.old
-                    or projection.new
-                  local side_lnum = line_info.source_side == "old" and line_info.old_lnum
-                    or line_info.new_lnum
-                  if side_lnum and side_map[side_lnum] then
-                    for _, cap in ipairs(side_map[side_lnum]) do
-                      local col_start = line_info.prefix_len + cap.col_start
-                      local col_end = cap.col_end == -1 and -1
-                        or (line_info.prefix_len + cap.col_end)
-                      table.insert(syntax_highlights, {
-                        line_info.buffer_line,
-                        cap.hl_group,
-                        col_start,
-                        col_end,
-                      })
-                    end
-                  end
-                end
-                used_projection = true
-              elseif projection == nil then
-                table.insert(
-                  syntax_requests,
-                  { key = cache_key, file = file, lang = lang }
-                )
-              end
-            end
-
-            if (not used_projection) and #code_lines > 0 then
-              local syn_hls = syntax.get_highlights(code_lines, lang)
-              for _, hl in ipairs(syn_hls) do
-                local mapping = code_line_mapping[hl.line]
-                if mapping then
-                  -- Offset columns by prefix length
-                  local col_start = mapping.prefix_len + hl.col_start
-                  local col_end = hl.col_end == -1 and -1
-                    or (mapping.prefix_len + hl.col_end)
-                  table.insert(syntax_highlights, {
-                    mapping.buffer_line,
-                    hl.hl_group,
-                    col_start,
-                    col_end,
-                  })
-                end
-              end
-            end
-
-            if used_projection then
-              table.insert(state.syntax_debug.projected_files, file.path)
-            elseif #code_lines > 0 then
-              table.insert(state.syntax_debug.fallback_files, file.path)
-            else
-              state.syntax_debug.skipped_files[file.path] = "no diff lines"
-            end
-          else
-            state.syntax_debug.skipped_files[file.path] = "no treesitter language"
-          end
-        end
-      end
-    end
-  end
-
-  -- Set lines
-  vim.api.nvim_buf_set_lines(state.buf, 0, -1, false, lines)
-
-  -- Apply diff highlights first (background)
-  vim.api.nvim_buf_clear_namespace(state.buf, ns_diff, 0, -1)
-  for _, hl in ipairs(highlights) do
-    local line_idx, hl_group, col_start, col_end = hl[1], hl[2], hl[3], hl[4]
-    vim.api.nvim_buf_add_highlight(
-      state.buf,
-      ns_diff,
-      hl_group,
-      line_idx - 1,
-      col_start,
-      col_end
-    )
-  end
-
-  -- Apply syntax highlights on top (foreground colors)
-  vim.api.nvim_buf_clear_namespace(state.buf, ns_syntax, 0, -1)
-  for _, hl in ipairs(syntax_highlights) do
-    local line_idx, hl_group, col_start, col_end = hl[1], hl[2], hl[3], hl[4]
-    vim.api.nvim_buf_add_highlight(
-      state.buf,
-      ns_syntax,
-      hl_group,
-      line_idx - 1,
-      col_start,
-      col_end
-    )
-  end
-
-  -- Apply virtual +/- markers in the left padding columns
-  vim.api.nvim_buf_clear_namespace(state.buf, ns_markers, 0, -1)
-  for _, marker in ipairs(markers) do
-    local line_idx, text, hl_group = marker[1], marker[2], marker[3]
-    vim.api.nvim_buf_set_extmark(state.buf, ns_markers, line_idx - 1, 0, {
-      virt_text = { { text, hl_group } },
-      virt_text_pos = "overlay",
-      priority = 200,
+    rendered = diff_view.render({
+      lines = lines,
+      highlights = highlights,
+      files = state.files,
+      icons = M.config.icons,
+      syntax = M.config.syntax,
+      syntax_projection_cache = state.syntax_projection_cache,
+      syntax_cache_prefix = table.concat(
+        { state.root or "", state.base_ref or "" },
+        "\n"
+      ),
+      queue_hunks = queue_file_hunks,
     })
   end
+
+  state.line_map = rendered.line_map
+  state.file_header_lines = rendered.file_header_lines
+  state.syntax_debug = rendered.syntax_debug or empty_syntax_debug
+
+  diff_view.apply(state.buf, rendered, {
+    diff = ns_diff,
+    syntax = ns_syntax,
+    markers = ns_markers,
+  })
 
   vim.bo[state.buf].modifiable = false
   update_winbar()
 
   -- Queue syntax projection jobs after first paint for responsive rendering.
-  for _, req in ipairs(syntax_requests) do
+  for _, req in ipairs(rendered.syntax_requests or {}) do
     queue_projection_cache(req.key, req.file, req.lang)
   end
 end
@@ -828,7 +510,7 @@ toggle_expand = function()
     render()
     -- Keep cursor on the file header
     for lnum, map in pairs(state.line_map) do
-      if map.file_idx == mapping.file_idx and not map.hunk_idx then
+      if map.file_idx == mapping.file_idx and map.kind == "file" then
         vim.api.nvim_win_set_cursor(state.win, { lnum, 0 })
         break
       end

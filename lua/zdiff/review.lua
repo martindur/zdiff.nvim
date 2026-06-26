@@ -1,7 +1,8 @@
 local M = {}
+local diff = require("zdiff.diff")
+local diff_view = require("zdiff.diff_view")
 local display = require("zdiff.display")
 local git = require("zdiff.git")
-local patch = require("zdiff.patch")
 
 ---@class ZdiffReviewPr
 ---@field number number
@@ -11,6 +12,8 @@ local patch = require("zdiff.patch")
 ---@field deletions number
 ---@field review_decision string
 ---@field is_draft boolean
+---@field base_ref_oid string|nil
+---@field head_ref_oid string|nil
 
 ---@class ZdiffReviewState
 ---@field buf number|nil
@@ -18,10 +21,9 @@ local patch = require("zdiff.patch")
 ---@field root string|nil
 ---@field view "list"|"diff"
 ---@field prs ZdiffReviewPr[]
----@field files ZdiffPatchFile[]
+---@field files ZdiffFile[]
 ---@field active_pr ZdiffReviewPr|nil
----@field line_map table<number, number|ZdiffReviewFileTarget|ZdiffReviewCommentTarget|ZdiffReviewPostedComment>
----@field expanded table<string, boolean>
+---@field line_map table<number, table|number>
 ---@field comments table<string, ZdiffReviewPostedComment[]>
 ---@field posting table<string, boolean>
 ---@field loading boolean
@@ -29,6 +31,10 @@ local patch = require("zdiff.patch")
 ---@field comment_error string|nil
 ---@field load_error string|nil
 ---@field refresh_seq number
+---@field syntax_projection_cache table<string, {old: table<number, table[]>, new: table<number, table[]>}|false>
+---@field syntax_jobs table<string, integer>
+---@field syntax_job_seq integer
+---@field syntax_debug {projected_files: string[], fallback_files: string[], skipped_files: table<string, string>}
 ---@field backend table|nil
 
 ---@type ZdiffReviewState
@@ -41,7 +47,6 @@ local state = {
   files = {},
   active_pr = nil,
   line_map = {},
-  expanded = {},
   comments = {},
   posting = {},
   loading = false,
@@ -49,20 +54,39 @@ local state = {
   comment_error = nil,
   load_error = nil,
   refresh_seq = 0,
+  syntax_projection_cache = {},
+  syntax_jobs = {},
+  syntax_job_seq = 0,
+  syntax_debug = {
+    projected_files = {},
+    fallback_files = {},
+    skipped_files = {},
+  },
   backend = nil,
 }
 
-local ns = vim.api.nvim_create_namespace("zdiff_review")
+local render
+
+local ns_diff = vim.api.nvim_create_namespace("zdiff_review")
+local ns_syntax = vim.api.nvim_create_namespace("zdiff_review_syntax")
+local ns_markers = vim.api.nvim_create_namespace("zdiff_review_markers")
 local icons = {
-  collapsed = ">",
-  expanded = "v",
+  collapsed = "",
+  expanded = "",
   added = "+",
   deleted = "-",
   modified = "~",
 }
-
----@class ZdiffReviewFileTarget
----@field file_key string
+local syntax_config = {
+  mode = "projection",
+  max_lines = 8000,
+}
+local cache_ttl = 300
+local cache = {
+  pr_refs = {},
+  pr_files = {},
+  file_contents = {},
+}
 
 ---@class ZdiffReviewCommentTarget
 ---@field pr_number number
@@ -175,6 +199,105 @@ local function split_lines(text)
   return lines
 end
 
+---@return integer
+local function now()
+  return os.time()
+end
+
+---@param path string
+---@return string
+local function encode_path(path)
+  local parts = vim.split(path, "/", { plain = true })
+  for idx, part in ipairs(parts) do
+    parts[idx] = vim.uri_encode(part)
+  end
+  return table.concat(parts, "/")
+end
+
+---@param value any
+---@return table[]
+local function flatten_pages(value)
+  local out = {}
+  if type(value) ~= "table" then
+    return out
+  end
+
+  for _, item in ipairs(value) do
+    if type(item) == "table" and item.filename then
+      table.insert(out, item)
+    elseif type(item) == "table" then
+      for _, nested in ipairs(item) do
+        if type(nested) == "table" then
+          table.insert(out, nested)
+        end
+      end
+    end
+  end
+  return out
+end
+
+---@param raw table
+---@param refs {base: string|nil, head: string|nil}
+---@return ZdiffFile|nil
+local function normalize_pr_file(raw, refs)
+  if type(raw.filename) ~= "string" then
+    return nil
+  end
+
+  local status = "M"
+  if raw.status == "added" then
+    status = "A"
+  elseif raw.status == "removed" then
+    status = "D"
+  elseif raw.status == "renamed" then
+    status = "R"
+  end
+
+  local old_path = raw.filename
+  local new_path = raw.filename
+  if status == "A" then
+    old_path = nil
+  elseif status == "D" then
+    new_path = nil
+  elseif status == "R" then
+    old_path = type(raw.previous_filename) == "string" and raw.previous_filename
+      or raw.filename
+  end
+
+  local display_path = raw.filename
+  if old_path and new_path and old_path ~= new_path then
+    display_path = old_path .. " -> " .. new_path
+  end
+
+  return {
+    path = new_path or old_path or raw.filename,
+    display_path = display_path,
+    old_path = old_path,
+    new_path = new_path,
+    status = status,
+    insertions = tonumber(raw.additions) or 0,
+    deletions = tonumber(raw.deletions) or 0,
+    expanded = false,
+    hunks = diff.parse_hunks(split_lines(tostring(raw.patch or ""))),
+    hunk_status = "loaded",
+    hunk_error = nil,
+    review_base_ref = refs.base,
+    review_head_ref = refs.head,
+  }
+end
+
+---@param file table
+---@param pr ZdiffReviewPr
+---@return ZdiffFile
+local function normalize_backend_file(file, pr)
+  file.expanded = file.expanded == true
+  file.hunk_status = file.hunk_status or "loaded"
+  file.hunk_error = file.hunk_error
+  file.review_base_ref = file.review_base_ref or pr.base_ref_oid
+  file.review_head_ref = file.review_head_ref or pr.head_ref_oid
+  return file
+end
+
 ---@param raw table
 ---@return ZdiffReviewPr
 local function normalize_pr(raw)
@@ -191,6 +314,8 @@ local function normalize_pr(raw)
     deletions = tonumber(raw.deletions) or 0,
     review_decision = tostring(raw.reviewDecision or ""),
     is_draft = raw.isDraft == true,
+    base_ref_oid = type(raw.baseRefOid) == "string" and raw.baseRefOid or nil,
+    head_ref_oid = type(raw.headRefOid) == "string" and raw.headRefOid or nil,
   }
 end
 
@@ -202,7 +327,7 @@ local function list_github_prs(root, done)
     "pr",
     "list",
     "--json",
-    "number,title,author,additions,deletions,reviewDecision,isDraft",
+    "number,title,author,additions,deletions,reviewDecision,isDraft,baseRefOid,headRefOid",
   }, function(result)
     if not result.ok then
       done({ ok = false, error = result.error })
@@ -225,14 +350,104 @@ end
 
 ---@param root string
 ---@param number number
----@param done fun(result: {ok: boolean, data?: ZdiffPatchFile[], error?: string})
-local function diff_github_pr(root, number, done)
-  run_async(root, { "gh", "pr", "diff", tostring(number), "--patch" }, function(result)
+---@param done fun(result: {ok: boolean, data?: {base: string|nil, head: string|nil}, error?: string})
+local function get_github_pr_refs(root, number, done)
+  local ref_cache_key = root .. "\0" .. tostring(number)
+  local cached = cache.pr_refs[ref_cache_key]
+  if cached and cached.expires_at > now() then
+    done({ ok = true, data = cached.data })
+    return
+  end
+
+  run_async(root, {
+    "gh",
+    "pr",
+    "view",
+    tostring(number),
+    "--json",
+    "baseRefOid,headRefOid",
+  }, function(result)
     if not result.ok then
       done({ ok = false, error = result.error })
       return
     end
-    done({ ok = true, data = patch.parse(split_lines(result.stdout)) })
+
+    local ok, decoded = pcall(vim.json.decode, result.stdout)
+    if not ok or type(decoded) ~= "table" then
+      done({ ok = false, error = "could not parse PR refs" })
+      return
+    end
+
+    local refs = {
+      base = type(decoded.baseRefOid) == "string" and decoded.baseRefOid or nil,
+      head = type(decoded.headRefOid) == "string" and decoded.headRefOid or nil,
+    }
+    cache.pr_refs[ref_cache_key] = {
+      expires_at = now() + cache_ttl,
+      data = refs,
+    }
+    done({ ok = true, data = refs })
+  end)
+end
+
+---@param root string
+---@param number number
+---@param done fun(result: {ok: boolean, data?: ZdiffFile[], error?: string})
+local function diff_github_pr(root, number, done)
+  get_github_pr_refs(root, number, function(ref_result)
+    if not ref_result.ok then
+      done({ ok = false, error = ref_result.error })
+      return
+    end
+
+    local refs = ref_result.data or {}
+    local cache_key = table.concat({
+      root,
+      tostring(number),
+      refs.base or "",
+      refs.head or "",
+    }, "\0")
+    local cached = cache.pr_files[cache_key]
+    if cached and cached.expires_at > now() then
+      done({ ok = true, data = vim.deepcopy(cached.data) })
+      return
+    end
+
+    run_async(root, {
+      "gh",
+      "api",
+      "--paginate",
+      "--slurp",
+      "--method",
+      "GET",
+      "repos/{owner}/{repo}/pulls/" .. tostring(number) .. "/files",
+      "-F",
+      "per_page=100",
+    }, function(result)
+      if not result.ok then
+        done({ ok = false, error = result.error })
+        return
+      end
+
+      local ok, decoded = pcall(vim.json.decode, result.stdout)
+      if not ok then
+        done({ ok = false, error = "could not parse PR files" })
+        return
+      end
+
+      local files = {}
+      for _, raw in ipairs(flatten_pages(decoded)) do
+        local file = normalize_pr_file(raw, refs)
+        if file then
+          table.insert(files, file)
+        end
+      end
+      cache.pr_files[cache_key] = {
+        expires_at = now() + cache_ttl,
+        data = vim.deepcopy(files),
+      }
+      done({ ok = true, data = files })
+    end)
   end)
 end
 
@@ -375,12 +590,50 @@ local function submit_github_reply(root, number, comment_id, body, done)
   end)
 end
 
+---@param root string
+---@param path string
+---@param ref string
+---@param done fun(result: {ok: boolean, data?: string[], error?: string})
+local function read_github_file(root, path, ref, done)
+  local cache_key = table.concat({ root, ref, path }, "\0")
+  local cached = cache.file_contents[cache_key]
+  if cached and cached.expires_at > now() then
+    done({ ok = true, data = cached.data })
+    return
+  end
+
+  run_async(root, {
+    "gh",
+    "api",
+    "--method",
+    "GET",
+    "repos/{owner}/{repo}/contents/" .. encode_path(path),
+    "-H",
+    "Accept: application/vnd.github.raw",
+    "-F",
+    "ref=" .. ref,
+  }, function(result)
+    if not result.ok then
+      done({ ok = false, error = result.error })
+      return
+    end
+
+    local lines = split_lines(result.stdout)
+    cache.file_contents[cache_key] = {
+      expires_at = now() + cache_ttl,
+      data = lines,
+    }
+    done({ ok = true, data = lines })
+  end)
+end
+
 local default_backend = {
   list_prs = list_github_prs,
   diff_pr = diff_github_pr,
   list_comments = list_github_comments,
   submit_comment = submit_github_comment,
   reply_comment = submit_github_reply,
+  read_file = read_github_file,
 }
 
 ---@return table
@@ -484,23 +737,13 @@ local function comment_key(pr_number, comment)
   })
 end
 
----@param file ZdiffPatchFile
----@return string
-local function file_key(file)
-  return table.concat({
-    file.old_path or "",
-    file.new_path or "",
-    file.path,
-  }, "\0")
-end
-
 ---@param comment ZdiffReviewPostedComment
 ---@return string
 local function reply_key(comment)
   return "reply\0" .. tostring(comment.id)
 end
 
----@param file ZdiffPatchFile
+---@param file table
 ---@param diff_line ZdiffLine
 ---@return ZdiffReviewCommentTarget|nil
 local function comment_target(file, diff_line)
@@ -528,6 +771,127 @@ local function comment_target(file, diff_line)
   end
 
   return nil
+end
+
+---@param file table
+---@param done fun(old_lines: string[]|nil, new_lines: string[]|nil)
+local function get_review_sources_async(file, done)
+  local read_file = backend().read_file
+  if not read_file or not state.root then
+    done(nil, nil)
+    return
+  end
+
+  local function load(path, ref, cb)
+    if not path then
+      cb(true, {})
+      return
+    end
+    if not ref then
+      cb(false, nil)
+      return
+    end
+    read_file(state.root, path, ref, function(result)
+      cb(result.ok, result.data or {})
+    end)
+  end
+
+  local old_lines = nil
+  local new_lines = nil
+  local failed = false
+  local completed = false
+
+  local function maybe_done()
+    if completed then
+      return
+    end
+    if failed then
+      completed = true
+      done(nil, nil)
+    elseif old_lines and new_lines then
+      completed = true
+      done(old_lines, new_lines)
+    end
+  end
+
+  load(file.old_path, file.review_base_ref, function(ok, lines)
+    if not ok then
+      failed = true
+    else
+      old_lines = lines
+    end
+    maybe_done()
+  end)
+
+  load(file.new_path, file.review_head_ref, function(ok, lines)
+    if not ok then
+      failed = true
+    else
+      new_lines = lines
+    end
+    maybe_done()
+  end)
+end
+
+---@param req {key: string, file: table, lang: string}
+local function queue_projection_cache(req)
+  diff_view.queue_projection_cache(state, req, {
+    syntax = syntax_config,
+    refresh_seq = state.refresh_seq,
+    load_sources = get_review_sources_async,
+    on_done = function()
+      render()
+    end,
+  })
+end
+
+---@param mapping table
+---@param file table
+---@param diff_line ZdiffLine
+local function map_diff_line(mapping, file, diff_line)
+  mapping.review_target = comment_target(file, diff_line)
+end
+
+---@param ctx table
+---@return table[]
+local function comment_rows(ctx)
+  local target = ctx.mapping.review_target
+  if not target then
+    return {}
+  end
+
+  local rows = {}
+  local key = target_key(target)
+  if state.posting[key] then
+    table.insert(rows, { text = "    # Posting..." })
+  end
+
+  for _, comment in ipairs(state.comments[key] or {}) do
+    local author = comment.author or ""
+    local prefix = author ~= "" and ("@" .. author .. ": ") or ""
+    local indent = comment.in_reply_to_id and "      " or "    "
+    local row = {
+      text = indent .. prefix .. comment.body,
+    }
+    if comment.id and not comment.in_reply_to_id then
+      row.map = {
+        kind = "review_comment",
+        file_idx = ctx.file_idx,
+        comment = comment,
+      }
+    end
+    table.insert(rows, row)
+
+    if
+      comment.id
+      and not comment.in_reply_to_id
+      and state.posting[reply_key(comment)]
+    then
+      table.insert(rows, { text = "      # Replying..." })
+    end
+  end
+
+  return rows
 end
 
 ---@param lines string[]
@@ -563,102 +927,72 @@ local function render_diff(lines, highlights)
       table.insert(lines, "  No diff found")
     end
     table.insert(highlights, { #lines, "Comment", 0, -1 })
-    return
+    return {
+      lines = lines,
+      highlights = highlights,
+      syntax_highlights = {},
+      syntax_requests = {},
+      markers = {},
+      line_map = {},
+      syntax_debug = state.syntax_debug,
+    }
   end
 
-  for _, file in ipairs(state.files) do
-    local key = file_key(file)
-    local expanded = state.expanded[key] == true
-    local file_line = display.format_file_line({
-      icon = expanded and icons.expanded or icons.collapsed,
-      status_icon = display.get_status_icon(file.status, icons),
-      path = file.display_path or file.path,
-      additions = file.insertions,
-      deletions = file.deletions,
-    })
-    table.insert(lines, file_line.text)
-    state.line_map[#lines] = { file_key = key }
-
-    table.insert(highlights, { #lines, "Directory", 0, file_line.add_start })
-    table.insert(
-      highlights,
-      { #lines, "DiffAdd", file_line.add_start, file_line.add_end }
-    )
-    table.insert(
-      highlights,
-      { #lines, "DiffDelete", file_line.del_start, file_line.del_end }
-    )
-
-    if expanded then
-      for _, hunk in ipairs(file.hunks) do
-        table.insert(lines, display.format_hunk_header(hunk, "  "))
-        table.insert(highlights, { #lines, "Comment", 0, -1 })
-
-        for _, diff_line in ipairs(hunk.lines) do
-          local marker = " "
-          if diff_line.type == "add" then
-            marker = "+"
-          elseif diff_line.type == "del" then
-            marker = "-"
-          end
-
-          table.insert(lines, "  " .. marker .. diff_line.text)
-          table.insert(
-            highlights,
-            { #lines, display.get_line_highlight(diff_line.type), 0, -1 }
-          )
-
-          local target = comment_target(file, diff_line)
-          if target then
-            state.line_map[#lines] = target
-            local target_map_key = target_key(target)
-            if state.posting[target_map_key] then
-              table.insert(lines, "    # Posting...")
-              table.insert(highlights, { #lines, "Comment", 0, -1 })
-            end
-            for _, comment in ipairs(state.comments[target_map_key] or {}) do
-              local author = comment.author or ""
-              local prefix = author ~= "" and ("@" .. author .. ": ") or ""
-              local indent = comment.in_reply_to_id and "      " or "    "
-              table.insert(lines, indent .. prefix .. comment.body)
-              table.insert(highlights, { #lines, "Comment", 0, -1 })
-              if comment.id and not comment.in_reply_to_id then
-                state.line_map[#lines] = comment
-                if state.posting[reply_key(comment)] then
-                  table.insert(lines, "      # Replying...")
-                  table.insert(highlights, { #lines, "Comment", 0, -1 })
-                end
-              end
-            end
-          end
-        end
-      end
-    end
-  end
+  return diff_view.render({
+    lines = lines,
+    highlights = highlights,
+    files = state.files,
+    icons = icons,
+    syntax = syntax_config,
+    syntax_projection_cache = state.syntax_projection_cache,
+    syntax_cache_prefix = table.concat({
+      state.root or "",
+      pr and tostring(pr.number) or "",
+      pr and (pr.base_ref_oid or "") or "",
+      pr and (pr.head_ref_oid or "") or "",
+    }, "\n"),
+    map_diff_line = map_diff_line,
+    extra_rows = comment_rows,
+  })
 end
 
-local function render()
+render = function()
   if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
     return
   end
 
   vim.bo[state.buf].modifiable = true
-  vim.api.nvim_buf_clear_namespace(state.buf, ns, 0, -1)
   state.line_map = {}
 
   local lines = {}
   local highlights = {}
+  local rendered = {
+    lines = lines,
+    highlights = highlights,
+    syntax_highlights = {},
+    syntax_requests = {},
+    markers = {},
+    line_map = state.line_map,
+    syntax_debug = state.syntax_debug,
+  }
   if state.view == "diff" then
-    render_diff(lines, highlights)
+    rendered = render_diff(lines, highlights)
+    state.line_map = rendered.line_map or {}
+    state.syntax_debug = rendered.syntax_debug or state.syntax_debug
   else
     render_list(lines, highlights)
   end
 
-  vim.api.nvim_buf_set_lines(state.buf, 0, -1, false, lines)
-  for _, hl in ipairs(highlights) do
-    vim.api.nvim_buf_add_highlight(state.buf, ns, hl[2], hl[1] - 1, hl[3], hl[4])
-  end
+  diff_view.apply(state.buf, rendered, {
+    diff = ns_diff,
+    syntax = ns_syntax,
+    markers = ns_markers,
+  })
   vim.bo[state.buf].modifiable = false
+
+  for _, req in ipairs(rendered.syntax_requests or {}) do
+    queue_projection_cache(req)
+  end
 end
 
 ---@param pr ZdiffReviewPr
@@ -704,13 +1038,19 @@ local function load_pr_diff(pr)
   state.view = "diff"
   state.active_pr = pr
   state.files = {}
-  state.expanded = {}
   state.comments = {}
   state.posting = {}
   state.comment_error = nil
   state.comments_loading = false
   state.loading = true
   state.load_error = nil
+  state.syntax_projection_cache = {}
+  state.syntax_jobs = {}
+  state.syntax_debug = {
+    projected_files = {},
+    fallback_files = {},
+    skipped_files = {},
+  }
   render()
 
   backend().diff_pr(state.root, pr.number, function(result)
@@ -719,7 +1059,10 @@ local function load_pr_diff(pr)
     end
 
     if result.ok then
-      state.files = result.data or {}
+      state.files = {}
+      for _, file in ipairs(result.data or {}) do
+        table.insert(state.files, normalize_backend_file(file, pr))
+      end
       state.load_error = nil
     else
       state.files = {}
@@ -746,13 +1089,14 @@ local function refresh_list()
   state.view = "list"
   state.active_pr = nil
   state.files = {}
-  state.expanded = {}
   state.comments = {}
   state.posting = {}
   state.comment_error = nil
   state.comments_loading = false
   state.loading = true
   state.load_error = nil
+  state.syntax_jobs = {}
+  state.syntax_projection_cache = {}
   render()
 
   backend().list_prs(state.root, function(result)
@@ -807,17 +1151,28 @@ local function toggle_file()
   end
 
   local cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
-  local target = state.line_map[cursor_line]
-  if type(target) ~= "table" or not target.file_key then
+  local mapping = state.line_map[cursor_line]
+  if type(mapping) ~= "table" or not mapping.file_idx then
     return
   end
 
-  if state.expanded[target.file_key] then
-    state.expanded[target.file_key] = nil
-  else
-    state.expanded[target.file_key] = true
+  local file = state.files[mapping.file_idx]
+  if not file then
+    return
   end
+
+  file.expanded = not file.expanded
   render()
+  for lnum, map in pairs(state.line_map) do
+    if
+      type(map) == "table"
+      and map.file_idx == mapping.file_idx
+      and map.kind == "file"
+    then
+      vim.api.nvim_win_set_cursor(state.win, { lnum, 0 })
+      break
+    end
+  end
 end
 
 ---@param target ZdiffReviewCommentTarget
@@ -868,8 +1223,9 @@ local function prompt_comment()
   end
 
   local cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
-  local target = state.line_map[cursor_line]
-  if type(target) ~= "table" or not target.pr_number then
+  local mapping = state.line_map[cursor_line]
+  local target = type(mapping) == "table" and mapping.review_target or nil
+  if not target then
     notify("No reviewable line under cursor", vim.log.levels.WARN)
     return
   end
@@ -925,7 +1281,8 @@ local function prompt_reply()
   end
 
   local cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
-  local comment = state.line_map[cursor_line]
+  local mapping = state.line_map[cursor_line]
+  local comment = type(mapping) == "table" and mapping.comment or nil
   if type(comment) ~= "table" or not comment.id or comment.in_reply_to_id then
     notify("No top-level comment under cursor", vim.log.levels.WARN)
     return
@@ -952,13 +1309,14 @@ local function close()
   state.files = {}
   state.active_pr = nil
   state.line_map = {}
-  state.expanded = {}
   state.comments = {}
   state.posting = {}
   state.comments_loading = false
   state.comment_error = nil
   state.loading = false
   state.load_error = nil
+  state.syntax_jobs = {}
+  state.syntax_projection_cache = {}
 end
 
 function M.open()
@@ -982,11 +1340,12 @@ function M.open()
   state.view = "list"
   state.active_pr = nil
   state.files = {}
-  state.expanded = {}
   state.comments = {}
   state.posting = {}
   state.comments_loading = false
   state.comment_error = nil
+  state.syntax_jobs = {}
+  state.syntax_projection_cache = {}
   state.buf = vim.api.nvim_create_buf(false, true)
   vim.bo[state.buf].buftype = "nofile"
   vim.bo[state.buf].bufhidden = "hide"
@@ -1023,16 +1382,26 @@ function M._set_backend(test_backend)
 end
 
 function M._debug_state()
+  local expanded_count = 0
+  for _, file in ipairs(state.files) do
+    if file.expanded then
+      expanded_count = expanded_count + 1
+    end
+  end
+
   return {
     loading = state.loading,
     load_error = state.load_error,
     view = state.view,
     pr_count = #state.prs,
     file_count = #state.files,
-    expanded_count = vim.tbl_count(state.expanded),
+    expanded_count = expanded_count,
     comment_count = vim.tbl_count(state.comments),
     posting_count = vim.tbl_count(state.posting),
     comments_loading = state.comments_loading,
+    pending_syntax_jobs = vim.tbl_count(state.syntax_jobs),
+    syntax_cache_entries = vim.tbl_count(state.syntax_projection_cache),
+    syntax = vim.deepcopy(state.syntax_debug),
     root = state.root,
   }
 end

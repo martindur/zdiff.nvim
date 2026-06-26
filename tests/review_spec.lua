@@ -53,6 +53,15 @@ local function contains_arg(argv, value)
   return false
 end
 
+local function list_contains(values, needle)
+  for _, value in ipairs(values) do
+    if value == needle then
+      return true
+    end
+  end
+  return false
+end
+
 local function expand_file(text)
   local toggle_keymap = get_normal_keymap(vim.api.nvim_get_current_buf(), "<Tab>")
   assert.is_not_nil(toggle_keymap)
@@ -187,8 +196,76 @@ describe("zdiff.review", function()
 
     expand_file("a.txt")
     content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
-    assert.is_truthy(content:find("-old", 1, true))
-    assert.is_truthy(content:find("+new", 1, true))
+    assert.is_truthy(content:find("old", 1, true))
+    assert.is_truthy(content:find("new", 1, true))
+
+    vim.api.nvim_win_set_cursor(0, { assert(find_line("new")), 0 })
+    get_normal_keymap(vim.api.nvim_get_current_buf(), "<Tab>").callback()
+    content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+    assert.equals(0, review._debug_state().expanded_count)
+    assert.is_nil(content:find("old", 1, true))
+  end)
+
+  it("projects syntax from backend file contents", function()
+    local reads = {}
+    review._set_backend({
+      list_prs = function(_, done)
+        done({
+          ok = true,
+          data = {
+            {
+              number = 12,
+              title = "Add review browser",
+              author = "dur",
+              additions = 1,
+              deletions = 1,
+              review_decision = "",
+              is_draft = false,
+              base_ref_oid = "base123",
+              head_ref_oid = "head123",
+            },
+          },
+        })
+      end,
+      diff_pr = function(_, _, done)
+        done({
+          ok = true,
+          data = patch.parse({
+            "diff --git a/a.lua b/a.lua",
+            "--- a/a.lua",
+            "+++ b/a.lua",
+            "@@ -1,2 +1,2 @@",
+            " local value = 1",
+            "-return value",
+            "+return value + 1",
+          }),
+        })
+      end,
+      read_file = function(_, path, ref, done)
+        table.insert(reads, { path = path, ref = ref })
+        if ref == "base123" then
+          done({ ok = true, data = { "local value = 1", "return value" } })
+        else
+          done({ ok = true, data = { "local value = 1", "return value + 1" } })
+        end
+      end,
+    })
+
+    review.open()
+    wait_for_loaded()
+    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
+    get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+    wait_for_loaded()
+    expand_file("a.lua")
+
+    assert.is_true(vim.wait(1000, function()
+      return review._debug_state().syntax_cache_entries == 1
+    end, 20))
+
+    local syntax_state = review._debug_state().syntax or {}
+    assert.is_true(list_contains(syntax_state.projected_files or {}, "a.lua"))
+    assert.equals("base123", reads[1].ref)
+    assert.equals("head123", reads[2].ref)
   end)
 
   it("posts prompted comments through the backend", function()
@@ -244,7 +321,7 @@ describe("zdiff.review", function()
     end
 
     local ok, err = pcall(function()
-      vim.api.nvim_win_set_cursor(0, { assert(find_line("+new")), 0 })
+      vim.api.nvim_win_set_cursor(0, { assert(find_line("new")), 0 })
       get_normal_keymap(vim.api.nvim_get_current_buf(), "c").callback()
     end)
     vim.ui.input = old_input
@@ -308,7 +385,7 @@ describe("zdiff.review", function()
     end
 
     local ok, err = pcall(function()
-      vim.api.nvim_win_set_cursor(0, { assert(find_line("+new")), 0 })
+      vim.api.nvim_win_set_cursor(0, { assert(find_line("new")), 0 })
       get_normal_keymap(vim.api.nvim_get_current_buf(), "c").callback()
       get_normal_keymap(vim.api.nvim_get_current_buf(), "c").callback()
     end)
@@ -494,28 +571,50 @@ describe("zdiff.review", function()
               deletions = 1,
               reviewDecision = "",
               isDraft = false,
+              baseRefOid = "base123",
+              headRefOid = "head123",
             },
           }),
           stderr = "",
         })
-      elseif argv[1] == "gh" and argv[2] == "pr" and argv[3] == "diff" then
-        callback({
-          code = 0,
-          stdout = table.concat({
-            "diff --git a/a.txt b/a.txt",
-            "--- a/a.txt",
-            "+++ b/a.txt",
-            "@@ -1,2 +1,2 @@",
-            " same",
-            "-old",
-            "+new",
-          }, "\n"),
-          stderr = "",
-        })
       elseif argv[1] == "gh" and argv[2] == "pr" and argv[3] == "view" then
-        callback({ code = 0, stdout = "abc123\n", stderr = "" })
+        if contains_arg(argv, "baseRefOid,headRefOid") then
+          callback({
+            code = 0,
+            stdout = vim.json.encode({
+              baseRefOid = "base123",
+              headRefOid = "head123",
+            }),
+            stderr = "",
+          })
+        else
+          callback({ code = 0, stdout = "abc123\n", stderr = "" })
+        end
       elseif argv[1] == "gh" and argv[2] == "api" then
-        if contains_arg(argv, "--method") then
+        if contains_arg(argv, "repos/{owner}/{repo}/pulls/12/files") then
+          callback({
+            code = 0,
+            stdout = vim.json.encode({
+              {
+                {
+                  filename = "a.txt",
+                  status = "modified",
+                  additions = 1,
+                  deletions = 1,
+                  patch = table.concat({
+                    "@@ -1,2 +1,2 @@",
+                    " same",
+                    "-old",
+                    "+new",
+                  }, "\n"),
+                },
+              },
+            }),
+            stderr = "",
+          })
+        elseif contains_arg(argv, "repos/{owner}/{repo}/contents/a.txt") then
+          callback({ code = 0, stdout = "same\nnew\n", stderr = "" })
+        elseif contains_arg(argv, "--method") then
           callback({ code = 0, stdout = "", stderr = "" })
         else
           callback({
@@ -558,7 +657,7 @@ describe("zdiff.review", function()
     end
 
     local ok, err = pcall(function()
-      vim.api.nvim_win_set_cursor(0, { assert(find_line("+new")), 0 })
+      vim.api.nvim_win_set_cursor(0, { assert(find_line("new")), 0 })
       get_normal_keymap(vim.api.nvim_get_current_buf(), "c").callback()
       assert.is_true(vim.wait(1000, function()
         for _, call in ipairs(calls) do
