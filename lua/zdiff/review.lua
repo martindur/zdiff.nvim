@@ -21,7 +21,11 @@ local patch = require("zdiff.patch")
 ---@field active_pr ZdiffReviewPr|nil
 ---@field line_map table<number, number|ZdiffReviewCommentTarget>
 ---@field drafts table<string, string>
+---@field comments table<string, ZdiffReviewPostedComment[]>
+---@field posting table<string, boolean>
 ---@field loading boolean
+---@field comments_loading boolean
+---@field comment_error string|nil
 ---@field load_error string|nil
 ---@field refresh_seq number
 ---@field backend table|nil
@@ -37,7 +41,11 @@ local state = {
   active_pr = nil,
   line_map = {},
   drafts = {},
+  comments = {},
+  posting = {},
   loading = false,
+  comments_loading = false,
+  comment_error = nil,
   load_error = nil,
   refresh_seq = 0,
   backend = nil,
@@ -56,6 +64,13 @@ local ns = vim.api.nvim_create_namespace("zdiff_review")
 ---@field side "LEFT"|"RIGHT"
 ---@field line number
 ---@field body string
+
+---@class ZdiffReviewPostedComment
+---@field path string
+---@field side "LEFT"|"RIGHT"
+---@field line number
+---@field body string
+---@field author string
 
 local function notify(msg, level)
   vim.notify("[zdiff.review] " .. msg, level or vim.log.levels.INFO)
@@ -208,17 +223,119 @@ local function diff_github_pr(root, number, done)
   end)
 end
 
+---@param raw table
+---@return ZdiffReviewPostedComment|nil
+local function normalize_comment(raw)
+  local line = tonumber(raw.line) or tonumber(raw.original_line)
+  if not line or type(raw.path) ~= "string" or type(raw.body) ~= "string" then
+    return nil
+  end
+
+  local user = raw.user
+  local author = ""
+  if type(user) == "table" and type(user.login) == "string" then
+    author = user.login
+  end
+
+  return {
+    path = raw.path,
+    side = raw.side == "LEFT" and "LEFT" or "RIGHT",
+    line = line,
+    body = raw.body,
+    author = author,
+  }
+end
+
+---@param root string
+---@param number number
+---@param done fun(result: {ok: boolean, data?: ZdiffReviewPostedComment[], error?: string})
+local function list_github_comments(root, number, done)
+  run_async(root, {
+    "gh",
+    "api",
+    "repos/{owner}/{repo}/pulls/" .. tostring(number) .. "/comments",
+  }, function(result)
+    if not result.ok then
+      done({ ok = false, error = result.error })
+      return
+    end
+
+    local ok, decoded = pcall(vim.json.decode, result.stdout)
+    if not ok or type(decoded) ~= "table" then
+      done({ ok = false, error = "could not parse PR comments" })
+      return
+    end
+
+    local comments = {}
+    for _, raw in ipairs(decoded) do
+      local comment = normalize_comment(raw)
+      if comment then
+        table.insert(comments, comment)
+      end
+    end
+    done({ ok = true, data = comments })
+  end)
+end
+
 ---@param root string
 ---@param number number
 ---@param comment ZdiffReviewComment
 ---@param done fun(result: {ok: boolean, error?: string})
 local function submit_github_comment(root, number, comment, done)
-  done({ ok = false, error = "comment submission is not implemented" })
+  run_async(root, {
+    "gh",
+    "pr",
+    "view",
+    tostring(number),
+    "--json",
+    "headRefOid",
+    "--jq",
+    ".headRefOid",
+  }, function(view_result)
+    if not view_result.ok then
+      done({ ok = false, error = view_result.error })
+      return
+    end
+
+    local commit_id = vim.trim(view_result.stdout)
+    if commit_id == "" then
+      done({ ok = false, error = "could not resolve PR head commit" })
+      return
+    end
+
+    run_async(root, {
+      "gh",
+      "api",
+      "--method",
+      "POST",
+      "repos/{owner}/{repo}/pulls/" .. tostring(number) .. "/comments",
+      "-H",
+      "Accept: application/vnd.github+json",
+      "-f",
+      "body=" .. comment.body,
+      "-f",
+      "commit_id=" .. commit_id,
+      "-f",
+      "path=" .. comment.path,
+      "-f",
+      "side=" .. comment.side,
+      "-F",
+      "line=" .. tostring(comment.line),
+      "--silent",
+    }, function(api_result)
+      if not api_result.ok then
+        done({ ok = false, error = api_result.error })
+        return
+      end
+      done({ ok = true })
+    end)
+  end)
 end
 
 local default_backend = {
   list_prs = list_github_prs,
   diff_pr = diff_github_pr,
+  list_comments = list_github_comments,
   submit_comment = submit_github_comment,
 }
 
@@ -326,13 +443,27 @@ end
 
 ---@param target ZdiffReviewCommentTarget
 ---@return string
-local function draft_key(target)
+local function target_key(target)
   return table.concat({
     tostring(target.pr_number),
     target.path,
     target.side,
     tostring(target.line),
   }, "\0")
+end
+
+local draft_key = target_key
+
+---@param pr_number number
+---@param comment ZdiffReviewPostedComment
+---@return string
+local function comment_key(pr_number, comment)
+  return target_key({
+    pr_number = pr_number,
+    path = comment.path,
+    side = comment.side,
+    line = comment.line,
+  })
 end
 
 ---@param file ZdiffPatchFile
@@ -375,12 +506,18 @@ local function render_diff(lines, highlights)
   end
   if state.loading then
     title = title .. " (loading...)"
+  elseif state.comments_loading then
+    title = title .. " (loading comments...)"
   end
 
   table.insert(lines, title)
   table.insert(lines, string.rep("-", 60))
   table.insert(highlights, { #lines - 1, "Title", 0, -1 })
   table.insert(highlights, { #lines, "Comment", 0, -1 })
+  if state.comment_error then
+    table.insert(lines, "  Error loading comments: " .. state.comment_error)
+    table.insert(highlights, { #lines, "Comment", 0, -1 })
+  end
 
   if #state.files == 0 then
     table.insert(lines, "")
@@ -442,9 +579,19 @@ local function render_diff(lines, highlights)
         local target = comment_target(file, diff_line)
         if target then
           state.line_map[#lines] = target
-          local draft = state.drafts[draft_key(target)]
+          local key = draft_key(target)
+          local draft = state.drafts[key]
           if draft then
             table.insert(lines, "    # " .. draft)
+            table.insert(highlights, { #lines, "Comment", 0, -1 })
+          end
+          if state.posting[key] then
+            table.insert(lines, "    # Posting...")
+            table.insert(highlights, { #lines, "Comment", 0, -1 })
+          end
+          for _, comment in ipairs(state.comments[key] or {}) do
+            local prefix = comment.author ~= "" and ("@" .. comment.author .. ": ") or ""
+            table.insert(lines, "    " .. prefix .. comment.body)
             table.insert(highlights, { #lines, "Comment", 0, -1 })
           end
         end
@@ -478,6 +625,35 @@ local function render()
 end
 
 ---@param pr ZdiffReviewPr
+local function load_pr_comments(pr)
+  local list_comments = backend().list_comments
+  if not list_comments or not state.root then
+    return
+  end
+
+  state.comments_loading = true
+  state.comment_error = nil
+  render()
+
+  list_comments(state.root, pr.number, function(result)
+    state.comments_loading = false
+    state.comments = {}
+
+    if result.ok then
+      for _, comment in ipairs(result.data or {}) do
+        local key = comment_key(pr.number, comment)
+        state.comments[key] = state.comments[key] or {}
+        table.insert(state.comments[key], comment)
+      end
+      state.comment_error = nil
+    else
+      state.comment_error = render_error(result.error)
+    end
+    render()
+  end)
+end
+
+---@param pr ZdiffReviewPr
 local function load_pr_diff(pr)
   if not state.root then
     state.load_error = "no git repository root for current session"
@@ -491,6 +667,10 @@ local function load_pr_diff(pr)
   state.view = "diff"
   state.active_pr = pr
   state.files = {}
+  state.comments = {}
+  state.posting = {}
+  state.comment_error = nil
+  state.comments_loading = false
   state.loading = true
   state.load_error = nil
   render()
@@ -509,6 +689,9 @@ local function load_pr_diff(pr)
     end
     state.loading = false
     render()
+    if result.ok then
+      load_pr_comments(pr)
+    end
   end)
 end
 
@@ -525,6 +708,10 @@ local function refresh_list()
   state.view = "list"
   state.active_pr = nil
   state.files = {}
+  state.comments = {}
+  state.posting = {}
+  state.comment_error = nil
+  state.comments_loading = false
   state.loading = true
   state.load_error = nil
   render()
@@ -629,6 +816,10 @@ local function post_draft_comment()
     notify("No draft comment on this line", vim.log.levels.WARN)
     return
   end
+  if state.posting[key] then
+    notify("Comment is already posting", vim.log.levels.WARN)
+    return
+  end
 
   local comment = {
     path = target.path,
@@ -637,13 +828,20 @@ local function post_draft_comment()
     body = body,
   }
 
+  state.posting[key] = true
+  notify("Posting comment...")
+  render()
+
   backend().submit_comment(state.root, pr.number, comment, function(result)
+    state.posting[key] = nil
     if result.ok then
       state.drafts[key] = nil
       notify("Posted comment")
       render()
+      load_pr_comments(pr)
     else
       notify(render_error(result.error), vim.log.levels.ERROR)
+      render()
     end
   end)
 end
@@ -662,6 +860,10 @@ local function close()
   state.active_pr = nil
   state.line_map = {}
   state.drafts = {}
+  state.comments = {}
+  state.posting = {}
+  state.comments_loading = false
+  state.comment_error = nil
   state.loading = false
   state.load_error = nil
 end
@@ -688,6 +890,10 @@ function M.open()
   state.active_pr = nil
   state.files = {}
   state.drafts = {}
+  state.comments = {}
+  state.posting = {}
+  state.comments_loading = false
+  state.comment_error = nil
   state.buf = vim.api.nvim_create_buf(false, true)
   vim.bo[state.buf].buftype = "nofile"
   vim.bo[state.buf].bufhidden = "hide"
@@ -730,6 +936,9 @@ function M._debug_state()
     pr_count = #state.prs,
     file_count = #state.files,
     draft_count = vim.tbl_count(state.drafts),
+    comment_count = vim.tbl_count(state.comments),
+    posting_count = vim.tbl_count(state.posting),
+    comments_loading = state.comments_loading,
     root = state.root,
   }
 end

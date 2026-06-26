@@ -44,6 +44,15 @@ local function find_line(text)
   return nil
 end
 
+local function contains_arg(argv, value)
+  for _, arg in ipairs(argv) do
+    if arg == value then
+      return true
+    end
+  end
+  return false
+end
+
 describe("zdiff.review", function()
   local plugin_root
 
@@ -293,6 +302,242 @@ describe("zdiff.review", function()
     assert.equals("RIGHT", submitted.comment.side)
     assert.equals(2, submitted.comment.line)
     assert.equals("Needs follow-up", submitted.comment.body)
+    assert.equals(0, review._debug_state().draft_count)
+  end)
+
+  it("shows posting state and blocks duplicate posts", function()
+    local calls = 0
+    review._set_backend({
+      list_prs = function(_, done)
+        done({
+          ok = true,
+          data = {
+            {
+              number = 12,
+              title = "Add review browser",
+              author = "dur",
+              additions = 1,
+              deletions = 1,
+              review_decision = "",
+              is_draft = false,
+            },
+          },
+        })
+      end,
+      diff_pr = function(_, _, done)
+        done({
+          ok = true,
+          data = patch.parse({
+            "diff --git a/a.txt b/a.txt",
+            "--- a/a.txt",
+            "+++ b/a.txt",
+            "@@ -1,2 +1,2 @@",
+            " same",
+            "-old",
+            "+new",
+          }),
+        })
+      end,
+      submit_comment = function()
+        calls = calls + 1
+      end,
+    })
+
+    review.open()
+    wait_for_loaded()
+    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
+    get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+    wait_for_loaded()
+
+    local old_input = vim.ui.input
+    vim.ui.input = function(_, on_confirm)
+      on_confirm("Needs follow-up")
+    end
+
+    local ok, err = pcall(function()
+      vim.api.nvim_win_set_cursor(0, { assert(find_line("+new")), 0 })
+      get_normal_keymap(vim.api.nvim_get_current_buf(), "c").callback()
+      get_normal_keymap(vim.api.nvim_get_current_buf(), "p").callback()
+      get_normal_keymap(vim.api.nvim_get_current_buf(), "p").callback()
+    end)
+    vim.ui.input = old_input
+
+    assert.is_true(ok, err)
+    assert.equals(1, calls)
+    assert.equals(1, review._debug_state().posting_count)
+    local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+    assert.is_truthy(content:find("# Posting...", 1, true))
+  end)
+
+  it("loads posted comments through the backend", function()
+    review._set_backend({
+      list_prs = function(_, done)
+        done({
+          ok = true,
+          data = {
+            {
+              number = 12,
+              title = "Add review browser",
+              author = "dur",
+              additions = 1,
+              deletions = 1,
+              review_decision = "",
+              is_draft = false,
+            },
+          },
+        })
+      end,
+      diff_pr = function(_, _, done)
+        done({
+          ok = true,
+          data = patch.parse({
+            "diff --git a/a.txt b/a.txt",
+            "--- a/a.txt",
+            "+++ b/a.txt",
+            "@@ -1,2 +1,2 @@",
+            " same",
+            "-old",
+            "+new",
+          }),
+        })
+      end,
+      list_comments = function(_, _, done)
+        done({
+          ok = true,
+          data = {
+            {
+              path = "a.txt",
+              side = "RIGHT",
+              line = 2,
+              body = "Already posted",
+              author = "dur",
+            },
+          },
+        })
+      end,
+    })
+
+    review.open()
+    wait_for_loaded()
+    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
+    get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+
+    assert.is_true(vim.wait(1000, function()
+      return review._debug_state().comment_count == 1
+    end, 20))
+
+    local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+    assert.is_truthy(content:find("@dur: Already posted", 1, true))
+  end)
+
+  it("posts draft comments with gh api in the default backend", function()
+    local old_system = vim.system
+    local calls = {}
+
+    vim.system = function(argv, _, callback)
+      table.insert(calls, argv)
+
+      if argv[1] == "gh" and argv[2] == "pr" and argv[3] == "list" then
+        callback({
+          code = 0,
+          stdout = vim.json.encode({
+            {
+              number = 12,
+              title = "Add review browser",
+              author = { login = "dur" },
+              additions = 1,
+              deletions = 1,
+              reviewDecision = "",
+              isDraft = false,
+            },
+          }),
+          stderr = "",
+        })
+      elseif argv[1] == "gh" and argv[2] == "pr" and argv[3] == "diff" then
+        callback({
+          code = 0,
+          stdout = table.concat({
+            "diff --git a/a.txt b/a.txt",
+            "--- a/a.txt",
+            "+++ b/a.txt",
+            "@@ -1,2 +1,2 @@",
+            " same",
+            "-old",
+            "+new",
+          }, "\n"),
+          stderr = "",
+        })
+      elseif argv[1] == "gh" and argv[2] == "pr" and argv[3] == "view" then
+        callback({ code = 0, stdout = "abc123\n", stderr = "" })
+      elseif argv[1] == "gh" and argv[2] == "api" then
+        if contains_arg(argv, "--method") then
+          callback({ code = 0, stdout = "", stderr = "" })
+        else
+          callback({
+            code = 0,
+            stdout = vim.json.encode({
+              {
+                path = "a.txt",
+                side = "RIGHT",
+                line = 2,
+                body = "Existing comment",
+                user = { login = "dur" },
+              },
+            }),
+            stderr = "",
+          })
+        end
+      else
+        callback({ code = 1, stdout = "", stderr = "unexpected command" })
+      end
+      return {}
+    end
+
+    review.open()
+    wait_for_loaded()
+    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
+    get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+    assert.is_true(vim.wait(1000, function()
+      return review._debug_state().comment_count == 1
+    end, 20))
+
+    local old_input = vim.ui.input
+    vim.ui.input = function(_, on_confirm)
+      on_confirm("Needs follow-up")
+    end
+
+    local ok, err = pcall(function()
+      vim.api.nvim_win_set_cursor(0, { assert(find_line("+new")), 0 })
+      get_normal_keymap(vim.api.nvim_get_current_buf(), "c").callback()
+      get_normal_keymap(vim.api.nvim_get_current_buf(), "p").callback()
+      assert.is_true(vim.wait(1000, function()
+        for _, call in ipairs(calls) do
+          if call[1] == "gh" and call[2] == "api" and contains_arg(call, "--method") then
+            return true
+          end
+        end
+        return false
+      end, 20))
+    end)
+    vim.ui.input = old_input
+    vim.system = old_system
+
+    assert.is_true(ok, err)
+
+    local api_call = nil
+    for _, call in ipairs(calls) do
+      if call[1] == "gh" and call[2] == "api" and contains_arg(call, "--method") then
+        api_call = call
+      end
+    end
+
+    assert.is_not_nil(api_call)
+    assert.is_true(contains_arg(api_call, "repos/{owner}/{repo}/pulls/12/comments"))
+    assert.is_true(contains_arg(api_call, "body=Needs follow-up"))
+    assert.is_true(contains_arg(api_call, "commit_id=abc123"))
+    assert.is_true(contains_arg(api_call, "path=a.txt"))
+    assert.is_true(contains_arg(api_call, "side=RIGHT"))
+    assert.is_true(contains_arg(api_call, "line=2"))
     assert.equals(0, review._debug_state().draft_count)
   end)
 end)
