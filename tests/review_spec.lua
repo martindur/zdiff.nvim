@@ -44,6 +44,11 @@ local function find_line(text)
   return nil
 end
 
+local function current_line()
+  local lnum = vim.api.nvim_win_get_cursor(0)[1]
+  return vim.api.nvim_buf_get_lines(0, lnum - 1, lnum, false)[1]
+end
+
 local function contains_arg(argv, value)
   for _, arg in ipairs(argv) do
     if arg == value then
@@ -550,6 +555,108 @@ describe("zdiff.review", function()
     local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
     assert.is_truthy(content:find("@dur: Already posted", 1, true))
     assert.is_truthy(content:find("@sam: Existing reply", 1, true))
+  end)
+
+  it("summarizes collapsed threads and jumps between them", function()
+    review._set_backend({
+      list_prs = function(_, done)
+        done({
+          ok = true,
+          data = {
+            {
+              number = 12,
+              title = "Add review browser",
+              author = "dur",
+              additions = 2,
+              deletions = 2,
+              review_decision = "",
+              is_draft = false,
+            },
+          },
+        })
+      end,
+      diff_pr = function(_, _, done)
+        done({
+          ok = true,
+          data = patch.parse({
+            "diff --git a/a.txt b/a.txt",
+            "--- a/a.txt",
+            "+++ b/a.txt",
+            "@@ -1,2 +1,2 @@",
+            " same",
+            "-old",
+            "+new",
+            "diff --git a/b.txt b/b.txt",
+            "--- a/b.txt",
+            "+++ b/b.txt",
+            "@@ -1,2 +1,2 @@",
+            " same",
+            "-before",
+            "+after",
+          }),
+        })
+      end,
+      list_comments = function(_, _, done)
+        done({
+          ok = true,
+          data = {
+            {
+              id = 44,
+              path = "a.txt",
+              side = "RIGHT",
+              line = 2,
+              body = "First thread",
+              author = "dur",
+            },
+            {
+              id = 45,
+              in_reply_to_id = 44,
+              path = "a.txt",
+              side = "RIGHT",
+              line = 2,
+              body = "First reply",
+              author = "sam",
+            },
+            {
+              id = 46,
+              path = "b.txt",
+              side = "RIGHT",
+              line = 2,
+              body = "Second thread",
+              author = "sam",
+            },
+          },
+        })
+      end,
+    })
+
+    review.open()
+    wait_for_loaded()
+    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
+    get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+    assert.is_true(vim.wait(1000, function()
+      return review._debug_state().comment_count == 2
+    end, 20))
+
+    local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+    assert.is_truthy(content:find("1 thread, 2 comments by @dur, @sam", 1, true))
+    assert.is_truthy(content:find("1 thread, 1 comment by @sam", 1, true))
+    assert.is_nil(content:find("@dur: First thread", 1, true))
+
+    local next_thread = get_normal_keymap(vim.api.nvim_get_current_buf(), "]t")
+    local prev_thread = get_normal_keymap(vim.api.nvim_get_current_buf(), "[t")
+    assert.is_not_nil(next_thread)
+    assert.is_not_nil(prev_thread)
+
+    vim.api.nvim_win_set_cursor(0, { 1, 0 })
+    next_thread.callback()
+    assert.is_truthy(current_line():find("@dur: First thread", 1, true))
+
+    next_thread.callback()
+    assert.is_truthy(current_line():find("@sam: Second thread", 1, true))
+
+    prev_thread.callback()
+    assert.is_truthy(current_line():find("@dur: First thread", 1, true))
   end)
 
   it("posts comments and replies with gh api in the default backend", function()

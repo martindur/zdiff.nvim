@@ -773,6 +773,116 @@ local function comment_target(file, diff_line)
   return nil
 end
 
+---@param comment ZdiffReviewPostedComment
+---@param file table
+---@return boolean
+local function comment_matches_file(comment, file)
+  if comment.side == "LEFT" then
+    return comment.path == (file.old_path or file.path) or comment.path == file.path
+  end
+  return comment.path == (file.new_path or file.path) or comment.path == file.path
+end
+
+---@param comment ZdiffReviewPostedComment
+---@return table|nil
+local function comment_location(comment)
+  for file_idx, file in ipairs(state.files) do
+    if comment_matches_file(comment, file) then
+      for hunk_idx, hunk in ipairs(file.hunks or {}) do
+        for line_idx, diff_line in ipairs(hunk.lines or {}) do
+          if
+            (comment.side == "LEFT" and diff_line.old_lnum == comment.line)
+            or (comment.side == "RIGHT" and diff_line.new_lnum == comment.line)
+          then
+            return {
+              file_idx = file_idx,
+              hunk_idx = hunk_idx,
+              line_idx = line_idx,
+              comment = comment,
+            }
+          end
+        end
+      end
+
+      return {
+        file_idx = file_idx,
+        hunk_idx = 0,
+        line_idx = 0,
+        comment = comment,
+      }
+    end
+  end
+  return nil
+end
+
+---@param file_idx number
+---@return number, number, string[]
+local function file_comment_counts(file_idx)
+  local file = state.files[file_idx]
+  if not file then
+    return 0, 0, {}
+  end
+
+  local threads = 0
+  local comments = 0
+  local seen_authors = {}
+  for _, group in pairs(state.comments) do
+    for _, comment in ipairs(group) do
+      if comment_matches_file(comment, file) then
+        comments = comments + 1
+        if comment.author and comment.author ~= "" then
+          seen_authors["@" .. comment.author] = true
+        end
+        if not comment.in_reply_to_id then
+          threads = threads + 1
+        end
+      end
+    end
+  end
+
+  local authors = vim.tbl_keys(seen_authors)
+  table.sort(authors)
+  return threads, comments, authors
+end
+
+---@param count number
+---@param word string
+---@return string
+local function count_word(count, word)
+  if count == 1 then
+    return "1 " .. word
+  end
+  return tostring(count) .. " " .. word .. "s"
+end
+
+---@param ctx table
+---@return table[]
+local function file_summary_rows(ctx)
+  if ctx.file.expanded then
+    return {}
+  end
+
+  local threads, comments, authors = file_comment_counts(ctx.file_idx)
+  if threads == 0 then
+    return {}
+  end
+
+  local text = "  "
+    .. count_word(threads, "thread")
+    .. ", "
+    .. count_word(comments, "comment")
+  if #authors > 0 then
+    text = text .. " by " .. table.concat(authors, ", ")
+  end
+
+  return {
+    {
+      text = text,
+      map = { kind = "review_thread_summary", file_idx = ctx.file_idx },
+    },
+  }
+end
+
 ---@param file table
 ---@param done fun(old_lines: string[]|nil, new_lines: string[]|nil)
 local function get_review_sources_async(file, done)
@@ -952,6 +1062,7 @@ local function render_diff(lines, highlights)
       pr and (pr.head_ref_oid or "") or "",
     }, "\n"),
     map_diff_line = map_diff_line,
+    extra_file_rows = file_summary_rows,
     extra_rows = comment_rows,
   })
 end
@@ -1175,6 +1286,143 @@ local function toggle_file()
   end
 end
 
+---@param a table
+---@param b table
+---@return boolean
+local function location_less(a, b)
+  if a.file_idx ~= b.file_idx then
+    return a.file_idx < b.file_idx
+  end
+  if a.hunk_idx ~= b.hunk_idx then
+    return a.hunk_idx < b.hunk_idx
+  end
+  if a.line_idx ~= b.line_idx then
+    return a.line_idx < b.line_idx
+  end
+  return (a.comment.id or 0) < (b.comment.id or 0)
+end
+
+---@return table[]
+local function thread_locations()
+  local locations = {}
+  for _, group in pairs(state.comments) do
+    for _, comment in ipairs(group) do
+      if not comment.in_reply_to_id then
+        local location = comment_location(comment)
+        if location then
+          table.insert(locations, location)
+        end
+      end
+    end
+  end
+  table.sort(locations, location_less)
+  return locations
+end
+
+---@param cursor_line number
+---@return table
+local function cursor_location(cursor_line)
+  local mapping = state.line_map[cursor_line]
+  if type(mapping) ~= "table" then
+    return { file_idx = 0, hunk_idx = 0, line_idx = 0, comment = {} }
+  end
+  if mapping.kind == "review_comment" and mapping.comment then
+    return comment_location(mapping.comment)
+      or { file_idx = mapping.file_idx or 0, hunk_idx = 0, line_idx = 0, comment = {} }
+  end
+  return {
+    file_idx = mapping.file_idx or 0,
+    hunk_idx = mapping.hunk_idx or 0,
+    line_idx = mapping.line_idx or 0,
+    comment = {},
+  }
+end
+
+---@param location table
+---@return number|nil
+local function find_thread_line(location)
+  for lnum, mapping in pairs(state.line_map) do
+    if
+      type(mapping) == "table"
+      and mapping.kind == "review_comment"
+      and mapping.comment
+      and mapping.comment.id == location.comment.id
+    then
+      return lnum
+    end
+  end
+
+  for lnum, mapping in pairs(state.line_map) do
+    if
+      type(mapping) == "table"
+      and mapping.file_idx == location.file_idx
+      and mapping.hunk_idx == location.hunk_idx
+      and mapping.line_idx == location.line_idx
+    then
+      return lnum
+    end
+  end
+
+  for lnum, mapping in pairs(state.line_map) do
+    if
+      type(mapping) == "table"
+      and mapping.file_idx == location.file_idx
+      and mapping.kind == "file"
+    then
+      return lnum
+    end
+  end
+  return nil
+end
+
+---@param direction 1|-1
+local function jump_thread(direction)
+  if
+    state.view ~= "diff"
+    or not state.win
+    or not vim.api.nvim_win_is_valid(state.win)
+  then
+    return
+  end
+
+  local locations = thread_locations()
+  if #locations == 0 then
+    notify("No review threads", vim.log.levels.WARN)
+    return
+  end
+
+  local current = cursor_location(vim.api.nvim_win_get_cursor(state.win)[1])
+  local selected = nil
+  if direction > 0 then
+    for _, location in ipairs(locations) do
+      if location_less(current, location) then
+        selected = location
+        break
+      end
+    end
+    selected = selected or locations[1]
+  else
+    for idx = #locations, 1, -1 do
+      if location_less(locations[idx], current) then
+        selected = locations[idx]
+        break
+      end
+    end
+    selected = selected or locations[#locations]
+  end
+
+  local file = state.files[selected.file_idx]
+  if file then
+    file.expanded = true
+  end
+  render()
+
+  local lnum = find_thread_line(selected)
+  if lnum then
+    vim.api.nvim_win_set_cursor(state.win, { lnum, 0 })
+  end
+end
+
 ---@param target ZdiffReviewCommentTarget
 ---@param body string
 local function post_comment(target, body)
@@ -1361,6 +1609,12 @@ function M.open()
   vim.keymap.set("n", "<Tab>", toggle_file, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "c", prompt_comment, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "r", prompt_reply, { buffer = state.buf, silent = true })
+  vim.keymap.set("n", "]t", function()
+    jump_thread(1)
+  end, { buffer = state.buf, silent = true })
+  vim.keymap.set("n", "[t", function()
+    jump_thread(-1)
+  end, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "R", refresh, { buffer = state.buf, silent = true })
 
   refresh_list()

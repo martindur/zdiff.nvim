@@ -308,7 +308,7 @@ local function render_loaded_hunks(ctx, file_idx, file)
   end
 end
 
----@param opts {lines: string[], highlights: table[], files: table[], icons: table, syntax: table|nil, syntax_projection_cache: table|nil, syntax_cache_prefix: string|nil, queue_hunks: fun(file_idx: number, file: table)|nil, map_diff_line: fun(mapping: table, file: table, diff_line: table)|nil, extra_rows: fun(ctx: table): table[]|nil}
+---@param opts {lines: string[], highlights: table[], files: table[], icons: table, syntax: table|nil, syntax_projection_cache: table|nil, syntax_cache_prefix: string|nil, queue_hunks: fun(file_idx: number, file: table)|nil, map_diff_line: fun(mapping: table, file: table, diff_line: table)|nil, extra_file_rows: fun(ctx: table): table[]|nil, extra_rows: fun(ctx: table): table[]|nil}
 ---@return table
 function M.render(opts)
   local ctx = {
@@ -326,6 +326,7 @@ function M.render(opts)
     syntax_cache_prefix = opts.syntax_cache_prefix,
     queue_hunks = opts.queue_hunks,
     map_diff_line = opts.map_diff_line,
+    extra_file_rows = opts.extra_file_rows,
     extra_rows = opts.extra_rows,
     syntax_debug = {
       projected_files = {},
@@ -358,6 +359,17 @@ function M.render(opts)
       ctx.highlights,
       { #ctx.lines, "DiffDelete", file_line.del_start, file_line.del_end }
     )
+
+    if ctx.extra_file_rows then
+      for _, row in
+        ipairs(ctx.extra_file_rows({
+          file_idx = file_idx,
+          file = file,
+        }) or {})
+      do
+        append_extra_row(ctx, row)
+      end
+    end
 
     if file.expanded then
       if file.hunk_status == "unloaded" and ctx.queue_hunks then
