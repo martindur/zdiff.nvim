@@ -229,4 +229,73 @@ describe("zdiff.review", function()
     assert.equals(1, review._debug_state().draft_count)
     assert.is_truthy(content:find("# Needs follow-up", 1, true))
   end)
+
+  it("submits draft comments through the backend", function()
+    local submitted = nil
+    review._set_backend({
+      list_prs = function(_, done)
+        done({
+          ok = true,
+          data = {
+            {
+              number = 12,
+              title = "Add review browser",
+              author = "dur",
+              additions = 1,
+              deletions = 1,
+              review_decision = "",
+              is_draft = false,
+            },
+          },
+        })
+      end,
+      diff_pr = function(_, _, done)
+        done({
+          ok = true,
+          data = patch.parse({
+            "diff --git a/a.txt b/a.txt",
+            "--- a/a.txt",
+            "+++ b/a.txt",
+            "@@ -1,2 +1,2 @@",
+            " same",
+            "-old",
+            "+new",
+          }),
+        })
+      end,
+      submit_review = function(_, number, payload, done)
+        submitted = { number = number, payload = payload }
+        done({ ok = true })
+      end,
+    })
+
+    review.open()
+    wait_for_loaded()
+    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
+    get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+    wait_for_loaded()
+
+    local old_input = vim.ui.input
+    vim.ui.input = function(_, on_confirm)
+      on_confirm("Needs follow-up")
+    end
+
+    local ok, err = pcall(function()
+      vim.api.nvim_win_set_cursor(0, { assert(find_line("+new")), 0 })
+      get_normal_keymap(vim.api.nvim_get_current_buf(), "c").callback()
+      get_normal_keymap(vim.api.nvim_get_current_buf(), "S").callback()
+    end)
+    vim.ui.input = old_input
+
+    assert.is_true(ok, err)
+    assert.equals(12, submitted.number)
+    assert.equals("COMMENT", submitted.payload.event)
+    assert.equals("", submitted.payload.body)
+    assert.equals(1, #submitted.payload.comments)
+    assert.equals("a.txt", submitted.payload.comments[1].path)
+    assert.equals("RIGHT", submitted.payload.comments[1].side)
+    assert.equals(2, submitted.payload.comments[1].line)
+    assert.equals("Needs follow-up", submitted.payload.comments[1].body)
+    assert.equals(0, review._debug_state().draft_count)
+  end)
 end)

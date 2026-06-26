@@ -51,6 +51,17 @@ local ns = vim.api.nvim_create_namespace("zdiff_review")
 ---@field side "LEFT"|"RIGHT"
 ---@field line number
 
+---@class ZdiffReviewDraft
+---@field path string
+---@field side "LEFT"|"RIGHT"
+---@field line number
+---@field body string
+
+---@class ZdiffReviewPayload
+---@field event "COMMENT"
+---@field body string
+---@field comments ZdiffReviewDraft[]
+
 local function notify(msg, level)
   vim.notify("[zdiff.review] " .. msg, level or vim.log.levels.INFO)
 end
@@ -202,9 +213,18 @@ local function diff_github_pr(root, number, done)
   end)
 end
 
+---@param root string
+---@param number number
+---@param review ZdiffReviewPayload
+---@param done fun(result: {ok: boolean, error?: string})
+local function submit_github_review(root, number, review, done)
+  done({ ok = false, error = "review submission is not implemented" })
+end
+
 local default_backend = {
   list_prs = list_github_prs,
   diff_pr = diff_github_pr,
+  submit_review = submit_github_review,
 }
 
 ---@return table
@@ -318,6 +338,60 @@ local function draft_key(target)
     target.side,
     tostring(target.line),
   }, "\0")
+end
+
+---@param key string
+---@return ZdiffReviewCommentTarget|nil
+local function target_from_key(key)
+  local parts = vim.split(key, "\0", { plain = true })
+  if #parts ~= 4 then
+    return nil
+  end
+
+  local line = tonumber(parts[4])
+  local pr_number = tonumber(parts[1])
+  if not line or not pr_number then
+    return nil
+  end
+
+  return {
+    pr_number = pr_number,
+    path = parts[2],
+    side = parts[3],
+    line = line,
+  }
+end
+
+---@return ZdiffReviewPayload
+local function draft_payload()
+  local comments = {}
+  for key, body in pairs(state.drafts) do
+    local target = target_from_key(key)
+    if target then
+      table.insert(comments, {
+        path = target.path,
+        side = target.side,
+        line = target.line,
+        body = body,
+      })
+    end
+  end
+
+  table.sort(comments, function(a, b)
+    if a.path ~= b.path then
+      return a.path < b.path
+    end
+    if a.side ~= b.side then
+      return a.side < b.side
+    end
+    return a.line < b.line
+  end)
+
+  return {
+    event = "COMMENT",
+    body = "",
+    comments = comments,
+  }
 end
 
 ---@param file ZdiffPatchFile
@@ -589,6 +663,29 @@ local function edit_draft_comment()
   )
 end
 
+local function submit_draft_review()
+  local pr = state.active_pr
+  if state.view ~= "diff" or not pr or not state.root then
+    return
+  end
+
+  local review = draft_payload()
+  if #review.comments == 0 then
+    notify("No draft comments to submit", vim.log.levels.WARN)
+    return
+  end
+
+  backend().submit_review(state.root, pr.number, review, function(result)
+    if result.ok then
+      state.drafts = {}
+      notify("Submitted review comments")
+      render()
+    else
+      notify(render_error(result.error), vim.log.levels.ERROR)
+    end
+  end)
+end
+
 local function close()
   state.refresh_seq = state.refresh_seq + 1
   if state.buf and vim.api.nvim_buf_is_valid(state.buf) then
@@ -642,6 +739,7 @@ function M.open()
   vim.keymap.set("n", "q", close, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "<CR>", open_selected_pr, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "c", edit_draft_comment, { buffer = state.buf, silent = true })
+  vim.keymap.set("n", "S", submit_draft_review, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "R", refresh, { buffer = state.buf, silent = true })
 
   refresh_list()
