@@ -53,6 +53,13 @@ local function contains_arg(argv, value)
   return false
 end
 
+local function expand_file(text)
+  local toggle_keymap = get_normal_keymap(vim.api.nvim_get_current_buf(), "<Tab>")
+  assert.is_not_nil(toggle_keymap)
+  vim.api.nvim_win_set_cursor(0, { assert(find_line(text or "a.txt")), 0 })
+  toggle_keymap.callback()
+end
+
 describe("zdiff.review", function()
   local plugin_root
 
@@ -176,6 +183,10 @@ describe("zdiff.review", function()
     assert.equals(1, review._debug_state().file_count)
     assert.is_truthy(content:find("PR #12 Add review browser", 1, true))
     assert.is_truthy(content:find("a.txt", 1, true))
+    assert.is_nil(content:find("-old", 1, true))
+
+    expand_file("a.txt")
+    content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
     assert.is_truthy(content:find("-old", 1, true))
     assert.is_truthy(content:find("+new", 1, true))
   end)
@@ -224,6 +235,7 @@ describe("zdiff.review", function()
     vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
     get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
     wait_for_loaded()
+    expand_file("a.txt")
 
     local old_input = vim.ui.input
     vim.ui.input = function(opts, on_confirm)
@@ -288,6 +300,7 @@ describe("zdiff.review", function()
     vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
     get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
     wait_for_loaded()
+    expand_file("a.txt")
 
     local old_input = vim.ui.input
     vim.ui.input = function(_, on_confirm)
@@ -369,6 +382,7 @@ describe("zdiff.review", function()
     assert.is_true(vim.wait(1000, function()
       return review._debug_state().comment_count == 1
     end, 20))
+    expand_file("a.txt")
 
     local old_input = vim.ui.input
     vim.ui.input = function(opts, on_confirm)
@@ -454,6 +468,7 @@ describe("zdiff.review", function()
     assert.is_true(vim.wait(1000, function()
       return review._debug_state().comment_count == 1
     end, 20))
+    expand_file("a.txt")
 
     local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
     assert.is_truthy(content:find("@dur: Already posted", 1, true))
@@ -531,6 +546,7 @@ describe("zdiff.review", function()
     assert.is_true(vim.wait(1000, function()
       return review._debug_state().comment_count == 1
     end, 20))
+    expand_file("a.txt")
 
     local old_input = vim.ui.input
     vim.ui.input = function(opts, on_confirm)
@@ -585,7 +601,9 @@ describe("zdiff.review", function()
       if call[1] == "gh" and call[2] == "api" and contains_arg(call, "--method") then
         if contains_arg(call, "repos/{owner}/{repo}/pulls/12/comments") then
           api_call = call
-        elseif contains_arg(call, "repos/{owner}/{repo}/pulls/12/comments/44/replies") then
+        elseif
+          contains_arg(call, "repos/{owner}/{repo}/pulls/12/comments/44/replies")
+        then
           reply_call = call
         end
       end

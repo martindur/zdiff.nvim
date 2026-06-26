@@ -1,4 +1,5 @@
 local M = {}
+local display = require("zdiff.display")
 local git = require("zdiff.git")
 local patch = require("zdiff.patch")
 
@@ -19,7 +20,8 @@ local patch = require("zdiff.patch")
 ---@field prs ZdiffReviewPr[]
 ---@field files ZdiffPatchFile[]
 ---@field active_pr ZdiffReviewPr|nil
----@field line_map table<number, number|ZdiffReviewCommentTarget|ZdiffReviewPostedComment>
+---@field line_map table<number, number|ZdiffReviewFileTarget|ZdiffReviewCommentTarget|ZdiffReviewPostedComment>
+---@field expanded table<string, boolean>
 ---@field comments table<string, ZdiffReviewPostedComment[]>
 ---@field posting table<string, boolean>
 ---@field loading boolean
@@ -39,6 +41,7 @@ local state = {
   files = {},
   active_pr = nil,
   line_map = {},
+  expanded = {},
   comments = {},
   posting = {},
   loading = false,
@@ -50,6 +53,16 @@ local state = {
 }
 
 local ns = vim.api.nvim_create_namespace("zdiff_review")
+local icons = {
+  collapsed = ">",
+  expanded = "v",
+  added = "+",
+  deleted = "-",
+  modified = "~",
+}
+
+---@class ZdiffReviewFileTarget
+---@field file_key string
 
 ---@class ZdiffReviewCommentTarget
 ---@field pr_number number
@@ -345,7 +358,9 @@ local function submit_github_reply(root, number, comment_id, body, done)
     "api",
     "--method",
     "POST",
-    "repos/{owner}/{repo}/pulls/" .. tostring(number) .. "/comments/" .. tostring(comment_id) .. "/replies",
+    "repos/{owner}/{repo}/pulls/" .. tostring(number) .. "/comments/" .. tostring(
+      comment_id
+    ) .. "/replies",
     "-H",
     "Accept: application/vnd.github+json",
     "-f",
@@ -431,43 +446,19 @@ local function render_list(lines, highlights)
       table.insert(lines, line)
       state.line_map[#lines] = idx
 
-      local add_stat = "+" .. pr.additions
-      local del_stat = "-" .. pr.deletions
-      local add_start = #line - #add_stat - #del_stat - 1
-      local add_end = add_start + #add_stat
-      local del_start = add_end + 1
-      local del_end = del_start + #del_stat
+      local stat_ranges = display.stat_ranges(line, pr.additions, pr.deletions)
 
-      table.insert(highlights, { #lines, "Directory", 0, add_start })
-      table.insert(highlights, { #lines, "DiffAdd", add_start, add_end })
-      table.insert(highlights, { #lines, "DiffDelete", del_start, del_end })
+      table.insert(highlights, { #lines, "Directory", 0, stat_ranges.add_start })
+      table.insert(
+        highlights,
+        { #lines, "DiffAdd", stat_ranges.add_start, stat_ranges.add_end }
+      )
+      table.insert(
+        highlights,
+        { #lines, "DiffDelete", stat_ranges.del_start, stat_ranges.del_end }
+      )
     end
   end
-end
-
----@param status string
----@return string
-local function status_icon(status)
-  if status == "A" then
-    return "+"
-  elseif status == "D" then
-    return "-"
-  else
-    return "~"
-  end
-end
-
----@param line_type "context"|"add"|"del"|"header"
----@return string
-local function line_highlight(line_type)
-  if line_type == "add" then
-    return "DiffAdd"
-  elseif line_type == "del" then
-    return "DiffDelete"
-  elseif line_type == "header" then
-    return "Title"
-  end
-  return "Normal"
 end
 
 ---@param target ZdiffReviewCommentTarget
@@ -491,6 +482,16 @@ local function comment_key(pr_number, comment)
     side = comment.side,
     line = comment.line,
   })
+end
+
+---@param file ZdiffPatchFile
+---@return string
+local function file_key(file)
+  return table.concat({
+    file.old_path or "",
+    file.new_path or "",
+    file.path,
+  }, "\0")
 end
 
 ---@param comment ZdiffReviewPostedComment
@@ -566,68 +567,67 @@ local function render_diff(lines, highlights)
   end
 
   for _, file in ipairs(state.files) do
-    local add_stat = "+" .. file.insertions
-    local del_stat = "-" .. file.deletions
-    local file_line = string.format(
-      "%s %s  %s %s",
-      status_icon(file.status),
-      file.display_path or file.path,
-      add_stat,
-      del_stat
+    local key = file_key(file)
+    local expanded = state.expanded[key] == true
+    local file_line = display.format_file_line({
+      icon = expanded and icons.expanded or icons.collapsed,
+      status_icon = display.get_status_icon(file.status, icons),
+      path = file.display_path or file.path,
+      additions = file.insertions,
+      deletions = file.deletions,
+    })
+    table.insert(lines, file_line.text)
+    state.line_map[#lines] = { file_key = key }
+
+    table.insert(highlights, { #lines, "Directory", 0, file_line.add_start })
+    table.insert(
+      highlights,
+      { #lines, "DiffAdd", file_line.add_start, file_line.add_end }
     )
-    table.insert(lines, file_line)
+    table.insert(
+      highlights,
+      { #lines, "DiffDelete", file_line.del_start, file_line.del_end }
+    )
 
-    local add_start = #file_line - #add_stat - #del_stat - 1
-    local add_end = add_start + #add_stat
-    local del_start = add_end + 1
-    local del_end = del_start + #del_stat
-    table.insert(highlights, { #lines, "Directory", 0, add_start })
-    table.insert(highlights, { #lines, "DiffAdd", add_start, add_end })
-    table.insert(highlights, { #lines, "DiffDelete", del_start, del_end })
+    if expanded then
+      for _, hunk in ipairs(file.hunks) do
+        table.insert(lines, display.format_hunk_header(hunk, "  "))
+        table.insert(highlights, { #lines, "Comment", 0, -1 })
 
-    for _, hunk in ipairs(file.hunks) do
-      table.insert(
-        lines,
-        string.format(
-          "  @@ -%d,%d +%d,%d @@",
-          hunk.old_start,
-          hunk.old_count,
-          hunk.new_start,
-          hunk.new_count
-        )
-      )
-      table.insert(highlights, { #lines, "Comment", 0, -1 })
-
-      for _, diff_line in ipairs(hunk.lines) do
-        local marker = " "
-        if diff_line.type == "add" then
-          marker = "+"
-        elseif diff_line.type == "del" then
-          marker = "-"
-        end
-
-        table.insert(lines, "  " .. marker .. diff_line.text)
-        table.insert(highlights, { #lines, line_highlight(diff_line.type), 0, -1 })
-
-        local target = comment_target(file, diff_line)
-        if target then
-          state.line_map[#lines] = target
-          local key = target_key(target)
-          if state.posting[key] then
-            table.insert(lines, "    # Posting...")
-            table.insert(highlights, { #lines, "Comment", 0, -1 })
+        for _, diff_line in ipairs(hunk.lines) do
+          local marker = " "
+          if diff_line.type == "add" then
+            marker = "+"
+          elseif diff_line.type == "del" then
+            marker = "-"
           end
-          for _, comment in ipairs(state.comments[key] or {}) do
-            local author = comment.author or ""
-            local prefix = author ~= "" and ("@" .. author .. ": ") or ""
-            local indent = comment.in_reply_to_id and "      " or "    "
-            table.insert(lines, indent .. prefix .. comment.body)
-            table.insert(highlights, { #lines, "Comment", 0, -1 })
-            if comment.id and not comment.in_reply_to_id then
-              state.line_map[#lines] = comment
-              if state.posting[reply_key(comment)] then
-                table.insert(lines, "      # Replying...")
-                table.insert(highlights, { #lines, "Comment", 0, -1 })
+
+          table.insert(lines, "  " .. marker .. diff_line.text)
+          table.insert(
+            highlights,
+            { #lines, display.get_line_highlight(diff_line.type), 0, -1 }
+          )
+
+          local target = comment_target(file, diff_line)
+          if target then
+            state.line_map[#lines] = target
+            local target_map_key = target_key(target)
+            if state.posting[target_map_key] then
+              table.insert(lines, "    # Posting...")
+              table.insert(highlights, { #lines, "Comment", 0, -1 })
+            end
+            for _, comment in ipairs(state.comments[target_map_key] or {}) do
+              local author = comment.author or ""
+              local prefix = author ~= "" and ("@" .. author .. ": ") or ""
+              local indent = comment.in_reply_to_id and "      " or "    "
+              table.insert(lines, indent .. prefix .. comment.body)
+              table.insert(highlights, { #lines, "Comment", 0, -1 })
+              if comment.id and not comment.in_reply_to_id then
+                state.line_map[#lines] = comment
+                if state.posting[reply_key(comment)] then
+                  table.insert(lines, "      # Replying...")
+                  table.insert(highlights, { #lines, "Comment", 0, -1 })
+                end
               end
             end
           end
@@ -704,6 +704,7 @@ local function load_pr_diff(pr)
   state.view = "diff"
   state.active_pr = pr
   state.files = {}
+  state.expanded = {}
   state.comments = {}
   state.posting = {}
   state.comment_error = nil
@@ -745,6 +746,7 @@ local function refresh_list()
   state.view = "list"
   state.active_pr = nil
   state.files = {}
+  state.expanded = {}
   state.comments = {}
   state.posting = {}
   state.comment_error = nil
@@ -793,6 +795,29 @@ local function open_selected_pr()
   if pr then
     load_pr_diff(pr)
   end
+end
+
+local function toggle_file()
+  if
+    state.view ~= "diff"
+    or not state.win
+    or not vim.api.nvim_win_is_valid(state.win)
+  then
+    return
+  end
+
+  local cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
+  local target = state.line_map[cursor_line]
+  if type(target) ~= "table" or not target.file_key then
+    return
+  end
+
+  if state.expanded[target.file_key] then
+    state.expanded[target.file_key] = nil
+  else
+    state.expanded[target.file_key] = true
+  end
+  render()
 end
 
 ---@param target ZdiffReviewCommentTarget
@@ -927,6 +952,7 @@ local function close()
   state.files = {}
   state.active_pr = nil
   state.line_map = {}
+  state.expanded = {}
   state.comments = {}
   state.posting = {}
   state.comments_loading = false
@@ -956,6 +982,7 @@ function M.open()
   state.view = "list"
   state.active_pr = nil
   state.files = {}
+  state.expanded = {}
   state.comments = {}
   state.posting = {}
   state.comments_loading = false
@@ -972,6 +999,7 @@ function M.open()
 
   vim.keymap.set("n", "q", close, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "<CR>", open_selected_pr, { buffer = state.buf, silent = true })
+  vim.keymap.set("n", "<Tab>", toggle_file, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "c", prompt_comment, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "r", prompt_reply, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "R", refresh, { buffer = state.buf, silent = true })
@@ -1001,6 +1029,7 @@ function M._debug_state()
     view = state.view,
     pr_count = #state.prs,
     file_count = #state.files,
+    expanded_count = vim.tbl_count(state.expanded),
     comment_count = vim.tbl_count(state.comments),
     posting_count = vim.tbl_count(state.posting),
     comments_loading = state.comments_loading,

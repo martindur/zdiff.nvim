@@ -333,15 +333,7 @@ end
 ---@param line_type "context"|"add"|"del"|"header"
 ---@return string
 local function get_line_highlight(line_type)
-  if line_type == "add" then
-    return "DiffAdd"
-  elseif line_type == "del" then
-    return "DiffDelete"
-  elseif line_type == "header" then
-    return "Title"
-  else
-    return "Normal"
-  end
+  return display.get_line_highlight(line_type)
 end
 
 ---@param filepath string
@@ -589,36 +581,31 @@ render = function()
     for file_idx, file in ipairs(state.files) do
       -- File header line
       local icon = file.expanded and M.config.icons.expanded or M.config.icons.collapsed
-      local status_icon = get_status_icon(file.status)
-      local add_stat = string.format("+%d", file.insertions)
-      local del_stat = string.format("-%d", file.deletions)
-      local file_line = string.format(
-        "%s %s %s  %s %s",
-        icon,
-        status_icon,
-        file.display_path or file.path,
-        add_stat,
-        del_stat
-      )
-      table.insert(lines, file_line)
+      local file_line = display.format_file_line({
+        icon = icon,
+        status_icon = get_status_icon(file.status),
+        path = file.display_path or file.path,
+        additions = file.insertions,
+        deletions = file.deletions,
+      })
+      table.insert(lines, file_line.text)
 
       -- Map this line to the file
       state.line_map[#lines] = { file_idx = file_idx }
       state.file_header_lines[file_idx] = #lines
 
-      -- Calculate positions for highlighting
-      local line_text = lines[#lines]
-      local add_start = #line_text - #add_stat - #del_stat - 1
-      local add_end = add_start + #add_stat
-      local del_start = add_end + 1
-      local del_end = del_start + #del_stat
-
       -- Highlight the file path part
-      table.insert(highlights, { #lines, "Directory", 0, add_start })
+      table.insert(highlights, { #lines, "Directory", 0, file_line.add_start })
       -- Highlight +N in green
-      table.insert(highlights, { #lines, "DiffAdd", add_start, add_end })
+      table.insert(
+        highlights,
+        { #lines, "DiffAdd", file_line.add_start, file_line.add_end }
+      )
       -- Highlight -M in red
-      table.insert(highlights, { #lines, "DiffDelete", del_start, del_end })
+      table.insert(
+        highlights,
+        { #lines, "DiffDelete", file_line.del_start, file_line.del_end }
+      )
 
       -- Show hunks only if expanded
       if file.expanded then
@@ -645,13 +632,7 @@ render = function()
 
           for hunk_idx, hunk in ipairs(file.hunks) do
             -- Hunk header
-            local hunk_header = string.format(
-              "  @@ -%d,%d +%d,%d @@",
-              hunk.old_start,
-              hunk.old_count,
-              hunk.new_start,
-              hunk.new_count
-            )
+            local hunk_header = display.format_hunk_header(hunk, "  ")
             -- Keep git metadata out of buffer text; render as virtual text instead.
             table.insert(lines, "  ")
             state.line_map[#lines] = { file_idx = file_idx, hunk_idx = hunk_idx }
