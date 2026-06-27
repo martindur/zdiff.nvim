@@ -1,10 +1,9 @@
 local M = {}
-local diff = require("zdiff.diff")
+local comments = require("zdiff.review.comments")
 local diff_view = require("zdiff.diff_view")
-local display = require("zdiff.display")
 local git = require("zdiff.git")
-local process = require("zdiff.process")
-local syntax = require("zdiff.syntax")
+local github = require("zdiff.review.github")
+local view = require("zdiff.review.view")
 
 ---@class ZdiffReviewPr
 ---@field number number
@@ -73,7 +72,6 @@ local state = {
 }
 
 local render
-local description_preview_lines = 8
 
 local ns_diff = vim.api.nvim_create_namespace("zdiff_review")
 local ns_syntax = vim.api.nvim_create_namespace("zdiff_review_syntax")
@@ -89,11 +87,6 @@ local icons = {
 local syntax_config = {
   mode = "projection",
   max_lines = 8000,
-}
-local cache_ttl = 300
-local cache = {
-  pr_files = {},
-  file_contents = {},
 }
 
 ---@class ZdiffReviewCommentTarget
@@ -126,87 +119,6 @@ local function render_error(msg)
   return vim.trim((msg or "unknown review error"):gsub("%s+", " "))
 end
 
----@param text string
----@return string[]
-local function split_lines(text)
-  if text == "" then
-    return {}
-  end
-
-  local lines = vim.split(text, "\n", { plain = true })
-  if #lines > 0 and lines[#lines] == "" then
-    table.remove(lines, #lines)
-  end
-  return lines
-end
-
----@return integer
-local function now()
-  return os.time()
-end
-
----@param path string
----@return string
-local function encode_path(path)
-  local parts = vim.split(path, "/", { plain = true })
-  for idx, part in ipairs(parts) do
-    parts[idx] = vim.uri_encode(part)
-  end
-  return table.concat(parts, "/")
-end
-
----@param raw table
----@param refs {base: string|nil, head: string|nil}
----@return ZdiffFile|nil
-local function normalize_pr_file(raw, refs)
-  if type(raw.filename) ~= "string" then
-    return nil
-  end
-
-  local status = "M"
-  if raw.status == "added" then
-    status = "A"
-  elseif raw.status == "removed" then
-    status = "D"
-  elseif raw.status == "renamed" then
-    status = "R"
-  end
-
-  local old_path = raw.filename
-  local new_path = raw.filename
-  if status == "A" then
-    old_path = nil
-  elseif status == "D" then
-    new_path = nil
-  elseif status == "R" then
-    old_path = type(raw.previous_filename) == "string" and raw.previous_filename
-      or raw.filename
-  end
-
-  local display_path = raw.filename
-  if old_path and new_path and old_path ~= new_path then
-    display_path = old_path .. " -> " .. new_path
-  end
-
-  local patch = type(raw.patch) == "string" and raw.patch or ""
-  return {
-    path = new_path or old_path or raw.filename,
-    display_path = display_path,
-    old_path = old_path,
-    new_path = new_path,
-    status = status,
-    insertions = tonumber(raw.additions) or 0,
-    deletions = tonumber(raw.deletions) or 0,
-    expanded = false,
-    hunks = diff.parse_hunks(split_lines(patch)),
-    hunk_status = "loaded",
-    hunk_error = nil,
-    patch_unavailable = type(raw.patch) ~= "string",
-    review_base_ref = refs.base,
-    review_head_ref = refs.head,
-  }
-end
-
 ---@param file table
 ---@param pr ZdiffReviewPr
 ---@return ZdiffFile
@@ -218,673 +130,11 @@ local function normalize_backend_file(file, pr)
   return file
 end
 
----@param raw table
----@return ZdiffReviewPr
-local function normalize_pr(raw)
-  local author = raw.author
-  if type(author) == "table" then
-    author = author.login
-  end
-
-  local body = raw.body
-  if body == nil then
-    body = raw.description
-  end
-
-  return {
-    number = tonumber(raw.number) or 0,
-    title = tostring(raw.title or ""),
-    author = tostring(author or ""),
-    additions = tonumber(raw.additions) or 0,
-    deletions = tonumber(raw.deletions) or 0,
-    review_decision = tostring(raw.reviewDecision or ""),
-    is_draft = raw.isDraft == true,
-    base_ref_oid = type(raw.baseRefOid) == "string" and raw.baseRefOid or nil,
-    head_ref_oid = type(raw.headRefOid) == "string" and raw.headRefOid or nil,
-    body = type(body) == "string" and body or nil,
-  }
-end
-
----@param root string
----@param done fun(result: {ok: boolean, data?: ZdiffReviewPr[], error?: string})
-local function list_github_prs(root, done)
-  process.run(root, {
-    "gh",
-    "pr",
-    "list",
-    "--json",
-    "number,title,author,additions,deletions,reviewDecision,isDraft,baseRefOid,headRefOid",
-  }, function(result)
-    if not result.ok then
-      done({ ok = false, error = result.error })
-      return
-    end
-
-    local ok, decoded = pcall(vim.json.decode, result.stdout)
-    if not ok or type(decoded) ~= "table" then
-      done({ ok = false, error = "could not parse gh pr list output" })
-      return
-    end
-
-    local prs = {}
-    for _, raw in ipairs(decoded) do
-      table.insert(prs, normalize_pr(raw))
-    end
-    done({ ok = true, data = prs })
-  end)
-end
-
----@param root string
----@param pr ZdiffReviewPr
----@param done fun(result: {ok: boolean, data?: ZdiffFile[], error?: string})
-local function diff_github_pr(root, pr, done)
-  local refs = { base = pr.base_ref_oid, head = pr.head_ref_oid }
-  local cache_key =
-    table.concat({ root, tostring(pr.number), refs.base or "", refs.head or "" }, "\0")
-  local cached = cache.pr_files[cache_key]
-  if cached and cached.expires_at > now() then
-    done({ ok = true, data = vim.deepcopy(cached.data) })
-    return
-  end
-
-  process.run(root, {
-    "gh",
-    "api",
-    "--paginate",
-    "--slurp",
-    "--method",
-    "GET",
-    "repos/{owner}/{repo}/pulls/" .. tostring(pr.number) .. "/files",
-    "-F",
-    "per_page=100",
-  }, function(result)
-    if not result.ok then
-      done({ ok = false, error = result.error })
-      return
-    end
-
-    local ok, pages = pcall(vim.json.decode, result.stdout)
-    if not ok or type(pages) ~= "table" then
-      done({ ok = false, error = "could not parse PR files" })
-      return
-    end
-
-    local files = {}
-    for _, page in ipairs(pages) do
-      for _, raw in ipairs(page) do
-        local file = normalize_pr_file(raw, refs)
-        if file then
-          table.insert(files, file)
-        end
-      end
-    end
-    cache.pr_files[cache_key] = {
-      expires_at = now() + cache_ttl,
-      data = vim.deepcopy(files),
-    }
-    done({ ok = true, data = files })
-  end)
-end
-
----@param root string
----@param number number
----@param done fun(result: {ok: boolean, data?: {body: string}, error?: string})
-local function read_github_pr(root, number, done)
-  process.run(root, {
-    "gh",
-    "pr",
-    "view",
-    tostring(number),
-    "--json",
-    "body",
-  }, function(result)
-    if not result.ok then
-      done({ ok = false, error = result.error })
-      return
-    end
-
-    local ok, decoded = pcall(vim.json.decode, result.stdout)
-    if not ok or type(decoded) ~= "table" then
-      done({ ok = false, error = "could not parse PR description" })
-      return
-    end
-
-    done({
-      ok = true,
-      data = {
-        body = type(decoded.body) == "string" and decoded.body or "",
-      },
-    })
-  end)
-end
-
----@param raw table
----@return ZdiffReviewPostedComment|nil
-local function normalize_comment(raw)
-  local line = tonumber(raw.line) or tonumber(raw.original_line)
-  if not line or type(raw.path) ~= "string" or type(raw.body) ~= "string" then
-    return nil
-  end
-
-  local user = raw.user
-  local author = ""
-  if type(user) == "table" and type(user.login) == "string" then
-    author = user.login
-  end
-
-  return {
-    id = tonumber(raw.id),
-    in_reply_to_id = tonumber(raw.in_reply_to_id),
-    path = raw.path,
-    side = raw.side == "LEFT" and "LEFT" or "RIGHT",
-    line = line,
-    body = raw.body,
-    author = author,
-  }
-end
-
----@param root string
----@param number number
----@param done fun(result: {ok: boolean, data?: ZdiffReviewPostedComment[], error?: string})
-local function list_github_comments(root, number, done)
-  process.run(root, {
-    "gh",
-    "api",
-    "repos/{owner}/{repo}/pulls/" .. tostring(number) .. "/comments",
-  }, function(result)
-    if not result.ok then
-      done({ ok = false, error = result.error })
-      return
-    end
-
-    local ok, decoded = pcall(vim.json.decode, result.stdout)
-    if not ok or type(decoded) ~= "table" then
-      done({ ok = false, error = "could not parse PR comments" })
-      return
-    end
-
-    local comments = {}
-    for _, raw in ipairs(decoded) do
-      local comment = normalize_comment(raw)
-      if comment then
-        table.insert(comments, comment)
-      end
-    end
-    done({ ok = true, data = comments })
-  end)
-end
-
----@param root string
----@param number number
----@param comment ZdiffReviewComment
----@param done fun(result: {ok: boolean, error?: string})
-local function submit_github_comment(root, number, comment, done)
-  process.run(root, {
-    "gh",
-    "api",
-    "--method",
-    "POST",
-    "repos/{owner}/{repo}/pulls/" .. tostring(number) .. "/comments",
-    "-H",
-    "Accept: application/vnd.github+json",
-    "-f",
-    "body=" .. comment.body,
-    "-f",
-    "commit_id=" .. comment.commit_id,
-    "-f",
-    "path=" .. comment.path,
-    "-f",
-    "side=" .. comment.side,
-    "-F",
-    "line=" .. tostring(comment.line),
-    "--silent",
-  }, done)
-end
-
----@param root string
----@param number number
----@param comment_id number
----@param body string
----@param done fun(result: {ok: boolean, error?: string})
-local function submit_github_reply(root, number, comment_id, body, done)
-  process.run(root, {
-    "gh",
-    "api",
-    "--method",
-    "POST",
-    "repos/{owner}/{repo}/pulls/" .. tostring(number) .. "/comments/" .. tostring(
-      comment_id
-    ) .. "/replies",
-    "-H",
-    "Accept: application/vnd.github+json",
-    "-f",
-    "body=" .. body,
-    "--silent",
-  }, done)
-end
-
----@param root string
----@param number number
----@param action "approve"|"request_changes"
----@param body string
----@param done fun(result: {ok: boolean, error?: string})
-local function submit_github_review(root, number, action, body, done)
-  process.run(root, {
-    "gh",
-    "pr",
-    "review",
-    tostring(number),
-    action == "approve" and "--approve" or "--request-changes",
-    "--body",
-    body,
-  }, done)
-end
-
----@param root string
----@param number number
----@param body string
----@param done fun(result: {ok: boolean, error?: string})
-local function submit_github_pr_comment(root, number, body, done)
-  process.run(root, {
-    "gh",
-    "pr",
-    "comment",
-    tostring(number),
-    "--body",
-    body,
-  }, done)
-end
-
----@param root string
----@param path string
----@param ref string
----@param done fun(result: {ok: boolean, data?: string[], error?: string})
-local function read_github_file(root, path, ref, done)
-  local cache_key = table.concat({ root, ref, path }, "\0")
-  local cached = cache.file_contents[cache_key]
-  if cached and cached.expires_at > now() then
-    done({ ok = true, data = cached.data })
-    return
-  end
-
-  process.run(root, {
-    "gh",
-    "api",
-    "--method",
-    "GET",
-    "repos/{owner}/{repo}/contents/" .. encode_path(path),
-    "-H",
-    "Accept: application/vnd.github.raw",
-    "-F",
-    "ref=" .. ref,
-  }, function(result)
-    if not result.ok then
-      done({ ok = false, error = result.error })
-      return
-    end
-
-    local lines = split_lines(result.stdout)
-    cache.file_contents[cache_key] = {
-      expires_at = now() + cache_ttl,
-      data = lines,
-    }
-    done({ ok = true, data = lines })
-  end)
-end
-
-local default_backend = {
-  list_prs = list_github_prs,
-  diff_pr = diff_github_pr,
-  read_pr = read_github_pr,
-  list_comments = list_github_comments,
-  submit_comment = submit_github_comment,
-  reply_comment = submit_github_reply,
-  submit_review = submit_github_review,
-  submit_pr_comment = submit_github_pr_comment,
-  read_file = read_github_file,
-}
+local default_backend = github
 
 ---@return table
 local function backend()
   return state.backend or default_backend
-end
-
----@param pr ZdiffReviewPr
----@return string
-local function format_pr(pr)
-  local meta = {}
-  if pr.author ~= "" then
-    table.insert(meta, "@" .. pr.author)
-  end
-  if pr.is_draft then
-    table.insert(meta, "draft")
-  end
-  if pr.review_decision ~= "" then
-    table.insert(meta, pr.review_decision:lower())
-  end
-  if state.pr_action_pending == pr.number then
-    table.insert(meta, "submitting...")
-  end
-
-  local suffix = ""
-  if #meta > 0 then
-    suffix = "  " .. table.concat(meta, " ")
-  end
-
-  return string.format(
-    "#%d %s%s  +%d -%d",
-    pr.number,
-    pr.title,
-    suffix,
-    pr.additions,
-    pr.deletions
-  )
-end
-
----@param lines string[]
----@param highlights table[]
-local function render_list(lines, highlights)
-  local title = " zdiff.review: Pull requests"
-  if state.loading then
-    title = title .. " (loading...)"
-  end
-
-  table.insert(lines, title)
-  table.insert(lines, string.rep("-", 60))
-  table.insert(highlights, { #lines - 1, "Title", 0, -1 })
-  table.insert(highlights, { #lines, "Comment", 0, -1 })
-
-  if #state.prs == 0 then
-    table.insert(lines, "")
-    if state.load_error then
-      table.insert(lines, "  Error loading pull requests: " .. state.load_error)
-    elseif state.loading then
-      table.insert(lines, "  Loading pull requests...")
-    else
-      table.insert(lines, "  No pull requests found")
-    end
-    table.insert(highlights, { #lines, "Comment", 0, -1 })
-  else
-    for idx, pr in ipairs(state.prs) do
-      local line = format_pr(pr)
-      table.insert(lines, line)
-      state.line_map[#lines] = idx
-
-      local stat_ranges = display.stat_ranges(line, pr.additions, pr.deletions)
-
-      table.insert(highlights, { #lines, "Directory", 0, stat_ranges.add_start })
-      table.insert(
-        highlights,
-        { #lines, "DiffAdd", stat_ranges.add_start, stat_ranges.add_end }
-      )
-      table.insert(
-        highlights,
-        { #lines, "DiffDelete", stat_ranges.del_start, stat_ranges.del_end }
-      )
-    end
-  end
-end
-
----@param target ZdiffReviewCommentTarget
----@return string
-local function target_key(target)
-  return table.concat({
-    tostring(target.pr_number),
-    target.path,
-    target.side,
-    tostring(target.line),
-  }, "\0")
-end
-
----@param pr_number number
----@param comment ZdiffReviewPostedComment
----@return string
-local function comment_key(pr_number, comment)
-  return target_key({
-    pr_number = pr_number,
-    path = comment.path,
-    side = comment.side,
-    line = comment.line,
-  })
-end
-
----@param comment ZdiffReviewPostedComment
----@return string
-local function reply_key(comment)
-  return "reply\0" .. tostring(comment.id)
-end
-
----@param file table
----@param diff_line ZdiffLine
----@return ZdiffReviewCommentTarget|nil
-local function comment_target(file, diff_line)
-  local pr = state.active_pr
-  if not pr then
-    return nil
-  end
-
-  if diff_line.type == "del" and diff_line.old_lnum then
-    return {
-      pr_number = pr.number,
-      path = file.old_path or file.path,
-      side = "LEFT",
-      line = diff_line.old_lnum,
-    }
-  end
-
-  if diff_line.new_lnum then
-    return {
-      pr_number = pr.number,
-      path = file.new_path or file.path,
-      side = "RIGHT",
-      line = diff_line.new_lnum,
-    }
-  end
-
-  return nil
-end
-
----@param comment ZdiffReviewPostedComment
----@param file table
----@return boolean
-local function comment_matches_file(comment, file)
-  if comment.side == "LEFT" then
-    return comment.path == (file.old_path or file.path) or comment.path == file.path
-  end
-  return comment.path == (file.new_path or file.path) or comment.path == file.path
-end
-
----@param comment ZdiffReviewPostedComment
----@return table|nil
-local function comment_location(comment)
-  for file_idx, file in ipairs(state.files) do
-    if comment_matches_file(comment, file) then
-      for hunk_idx, hunk in ipairs(file.hunks or {}) do
-        for line_idx, diff_line in ipairs(hunk.lines or {}) do
-          if
-            (comment.side == "LEFT" and diff_line.old_lnum == comment.line)
-            or (comment.side == "RIGHT" and diff_line.new_lnum == comment.line)
-          then
-            return {
-              file_idx = file_idx,
-              hunk_idx = hunk_idx,
-              line_idx = line_idx,
-              comment = comment,
-            }
-          end
-        end
-      end
-
-      return {
-        file_idx = file_idx,
-        hunk_idx = 0,
-        line_idx = 0,
-        comment = comment,
-      }
-    end
-  end
-  return nil
-end
-
----@param file_idx number
----@return number, number, string[]
-local function file_comment_counts(file_idx)
-  local file = state.files[file_idx]
-  if not file then
-    return 0, 0, {}
-  end
-
-  local threads = 0
-  local comments = 0
-  local seen_authors = {}
-  for _, group in pairs(state.comments) do
-    for _, comment in ipairs(group) do
-      if comment_matches_file(comment, file) then
-        comments = comments + 1
-        if comment.author and comment.author ~= "" then
-          seen_authors["@" .. comment.author] = true
-        end
-        if not comment.in_reply_to_id then
-          threads = threads + 1
-        end
-      end
-    end
-  end
-
-  local authors = vim.tbl_keys(seen_authors)
-  table.sort(authors)
-  return threads, comments, authors
-end
-
----@param count number
----@param word string
----@return string
-local function count_word(count, word)
-  if count == 1 then
-    return "1 " .. word
-  end
-  return tostring(count) .. " " .. word .. "s"
-end
-
----@param pr ZdiffReviewPr|nil
----@return string
-local function pr_body(pr)
-  if not pr or type(pr.body) ~= "string" then
-    return ""
-  end
-  return vim.trim(pr.body:gsub("\r\n", "\n"):gsub("\r", "\n"))
-end
-
----@param pr ZdiffReviewPr|nil
----@return boolean
-local function has_pr_body(pr)
-  return pr_body(pr) ~= ""
-end
-
----@param markdown_lines string[]
----@param line_mappings table<number, {buffer_line: number, prefix_len: number}>
----@param syntax_highlights table[]
-local function add_description_syntax(markdown_lines, line_mappings, syntax_highlights)
-  local lang = syntax.get_lang_from_filetype("markdown")
-  if not lang then
-    return
-  end
-
-  for _, hl in ipairs(syntax.get_highlights(markdown_lines, lang)) do
-    local mapping = line_mappings[hl.line]
-    if mapping then
-      local col_start = mapping.prefix_len + hl.col_start
-      local col_end = hl.col_end == -1 and -1 or (mapping.prefix_len + hl.col_end)
-      table.insert(syntax_highlights, {
-        mapping.buffer_line,
-        hl.hl_group,
-        col_start,
-        col_end,
-      })
-    end
-  end
-end
-
----@param lines string[]
----@param highlights table[]
----@param syntax_highlights table[]
----@param pr ZdiffReviewPr|nil
-local function render_pr_description(lines, highlights, syntax_highlights, pr)
-  local body = pr_body(pr)
-  if body == "" then
-    return
-  end
-
-  local body_lines = split_lines(body)
-  if #body_lines == 0 then
-    return
-  end
-
-  table.insert(lines, " Description")
-  table.insert(highlights, { #lines, "Title", 0, -1 })
-
-  local limit = state.description_expanded and #body_lines
-    or math.min(#body_lines, description_preview_lines)
-  local line_mappings = {}
-  for idx = 1, limit do
-    table.insert(lines, "  " .. body_lines[idx])
-    line_mappings[idx] = {
-      buffer_line = #lines,
-      prefix_len = 2,
-    }
-    table.insert(highlights, { #lines, "Comment", 0, -1 })
-  end
-  add_description_syntax(body_lines, line_mappings, syntax_highlights)
-
-  local remaining = #body_lines - limit
-  if remaining > 0 then
-    local suffix = remaining == 1 and "line" or "lines"
-    table.insert(
-      lines,
-      string.format("  ... %d more description %s", remaining, suffix)
-    )
-    table.insert(highlights, { #lines, "Comment", 0, -1 })
-  end
-
-  table.insert(lines, string.rep("-", 60))
-  table.insert(highlights, { #lines, "Comment", 0, -1 })
-end
-
----@param ctx table
----@return table[]
-local function file_summary_rows(ctx)
-  if ctx.file.expanded then
-    if ctx.file.patch_unavailable then
-      return {
-        {
-          text = "  Patch unavailable from GitHub (binary or too large)",
-          hl_group = "Comment",
-        },
-      }
-    end
-    return {}
-  end
-
-  local threads, comments, authors = file_comment_counts(ctx.file_idx)
-  if threads == 0 then
-    return {}
-  end
-
-  local text = "  "
-    .. count_word(threads, "thread")
-    .. ", "
-    .. count_word(comments, "comment")
-  if #authors > 0 then
-    text = text .. " by " .. table.concat(authors, ", ")
-  end
-
-  return {
-    {
-      text = text,
-      hl_group = "ZdiffReviewThread",
-      map = { kind = "review_thread_summary", file_idx = ctx.file_idx },
-    },
-  }
 end
 
 ---@param file table
@@ -963,120 +213,7 @@ end
 ---@param file table
 ---@param diff_line ZdiffLine
 local function map_diff_line(mapping, file, diff_line)
-  mapping.review_target = comment_target(file, diff_line)
-end
-
----@param ctx table
----@return table[]
-local function comment_rows(ctx)
-  local target = ctx.mapping.review_target
-  if not target then
-    return {}
-  end
-
-  local rows = {}
-  local key = target_key(target)
-  if state.posting[key] then
-    table.insert(rows, { text = "    Posting...", hl_group = "ZdiffReviewThread" })
-  end
-
-  for _, comment in ipairs(state.comments[key] or {}) do
-    local author = comment.author or ""
-    local prefix = author ~= "" and ("@" .. author .. ": ") or ""
-    local indent = comment.in_reply_to_id and "      " or "    "
-    for line_idx, body_line in
-      ipairs(vim.split(comment.body:gsub("\r\n", "\n"), "\n", { plain = true }))
-    do
-      local row = {
-        text = indent .. (line_idx == 1 and prefix or "") .. body_line,
-        hl_group = "ZdiffReviewThread",
-      }
-      if line_idx == 1 and comment.id and not comment.in_reply_to_id then
-        row.map = {
-          kind = "review_comment",
-          file_idx = ctx.file_idx,
-          comment = comment,
-        }
-      end
-      table.insert(rows, row)
-    end
-
-    if
-      comment.id
-      and not comment.in_reply_to_id
-      and state.posting[reply_key(comment)]
-    then
-      table.insert(rows, { text = "      Replying...", hl_group = "ZdiffReviewThread" })
-    end
-  end
-
-  return rows
-end
-
----@param lines string[]
----@param highlights table[]
-local function render_diff(lines, highlights)
-  local syntax_highlights = {}
-  local pr = state.active_pr
-  local title = " zdiff.review: PR diff"
-  if pr then
-    title = string.format(" zdiff.review: PR #%d %s", pr.number, pr.title)
-  end
-  if state.loading then
-    title = title .. " (loading...)"
-  elseif state.comments_loading then
-    title = title .. " (loading comments...)"
-  end
-
-  table.insert(lines, title)
-  table.insert(lines, string.rep("-", 60))
-  table.insert(highlights, { #lines - 1, "Title", 0, -1 })
-  table.insert(highlights, { #lines, "Comment", 0, -1 })
-  if state.comment_error then
-    table.insert(lines, "  Error loading comments: " .. state.comment_error)
-    table.insert(highlights, { #lines, "Comment", 0, -1 })
-  end
-  render_pr_description(lines, highlights, syntax_highlights, pr)
-
-  if #state.files == 0 then
-    table.insert(lines, "")
-    if state.load_error then
-      table.insert(lines, "  Error loading PR diff: " .. state.load_error)
-    elseif state.loading then
-      table.insert(lines, "  Loading PR diff...")
-    else
-      table.insert(lines, "  No diff found")
-    end
-    table.insert(highlights, { #lines, "Comment", 0, -1 })
-    return {
-      lines = lines,
-      highlights = highlights,
-      syntax_highlights = syntax_highlights,
-      syntax_requests = {},
-      markers = {},
-      line_map = {},
-      syntax_debug = state.syntax_debug,
-    }
-  end
-
-  return diff_view.render({
-    lines = lines,
-    highlights = highlights,
-    syntax_highlights = syntax_highlights,
-    files = state.files,
-    icons = icons,
-    syntax = syntax_config,
-    syntax_projection_cache = state.syntax_projection_cache,
-    syntax_cache_prefix = table.concat({
-      state.root or "",
-      pr and tostring(pr.number) or "",
-      pr and (pr.base_ref_oid or "") or "",
-      pr and (pr.head_ref_oid or "") or "",
-    }, "\n"),
-    map_diff_line = map_diff_line,
-    extra_file_rows = file_summary_rows,
-    extra_rows = comment_rows,
-  })
+  mapping.review_target = comments.target(state.active_pr, file, diff_line)
 end
 
 render = function()
@@ -1099,11 +236,16 @@ render = function()
     syntax_debug = state.syntax_debug,
   }
   if state.view == "diff" then
-    rendered = render_diff(lines, highlights)
+    rendered = view.render_diff(state, lines, highlights, {
+      icons = icons,
+      syntax = syntax_config,
+      map_diff_line = map_diff_line,
+    })
     state.line_map = rendered.line_map or {}
     state.syntax_debug = rendered.syntax_debug or state.syntax_debug
   else
-    render_list(lines, highlights)
+    rendered = view.render_list(state, lines, highlights)
+    state.line_map = rendered.line_map or {}
   end
 
   diff_view.apply(state.buf, rendered, {
@@ -1163,7 +305,7 @@ local function load_pr_comments(pr)
 
     if result.ok then
       for _, comment in ipairs(result.data or {}) do
-        local key = comment_key(pr.number, comment)
+        local key = comments.comment_key(pr.number, comment)
         state.comments[key] = state.comments[key] or {}
         table.insert(state.comments[key], comment)
       end
@@ -1405,7 +547,7 @@ local function prompt_pr_action()
 end
 
 local function toggle_description()
-  if state.view ~= "diff" or not has_pr_body(state.active_pr) then
+  if state.view ~= "diff" or not view.has_pr_body(state.active_pr) then
     return
   end
 
@@ -1447,36 +589,20 @@ local function toggle_file()
   end
 end
 
----@param a table
----@param b table
----@return boolean
-local function location_less(a, b)
-  if a.file_idx ~= b.file_idx then
-    return a.file_idx < b.file_idx
-  end
-  if a.hunk_idx ~= b.hunk_idx then
-    return a.hunk_idx < b.hunk_idx
-  end
-  if a.line_idx ~= b.line_idx then
-    return a.line_idx < b.line_idx
-  end
-  return (a.comment.id or 0) < (b.comment.id or 0)
-end
-
 ---@return table[]
 local function thread_locations()
   local locations = {}
   for _, group in pairs(state.comments) do
     for _, comment in ipairs(group) do
       if not comment.in_reply_to_id then
-        local location = comment_location(comment)
+        local location = comments.location(state.files, comment)
         if location then
           table.insert(locations, location)
         end
       end
     end
   end
-  table.sort(locations, location_less)
+  table.sort(locations, comments.location_less)
   return locations
 end
 
@@ -1488,7 +614,7 @@ local function cursor_location(cursor_line)
     return { file_idx = 0, hunk_idx = 0, line_idx = 0, comment = {} }
   end
   if mapping.kind == "review_comment" and mapping.comment then
-    return comment_location(mapping.comment)
+    return comments.location(state.files, mapping.comment)
       or { file_idx = mapping.file_idx or 0, hunk_idx = 0, line_idx = 0, comment = {} }
   end
   return {
@@ -1556,7 +682,7 @@ local function jump_thread(direction)
   local selected = nil
   if direction > 0 then
     for _, location in ipairs(locations) do
-      if location_less(current, location) then
+      if comments.location_less(current, location) then
         selected = location
         break
       end
@@ -1564,7 +690,7 @@ local function jump_thread(direction)
     selected = selected or locations[1]
   else
     for idx = #locations, 1, -1 do
-      if location_less(locations[idx], current) then
+      if comments.location_less(locations[idx], current) then
         selected = locations[idx]
         break
       end
@@ -1594,7 +720,7 @@ local function post_comment(target, body)
     return
   end
 
-  local key = target_key(target)
+  local key = comments.target_key(target)
   if state.posting[key] then
     notify("Comment is already posting", vim.log.levels.WARN)
     return
@@ -1658,7 +784,7 @@ local function post_reply(comment, body)
     return
   end
 
-  local key = reply_key(comment)
+  local key = comments.reply_key(comment)
   if state.posting[key] then
     notify("Reply is already posting", vim.log.levels.WARN)
     return
