@@ -38,7 +38,6 @@ local view = require("zdiff.review.view")
 ---@field syntax_projection_cache table<string, {old: table<number, table[]>, new: table<number, table[]>}|false>
 ---@field syntax_jobs table<string, integer>
 ---@field syntax_job_seq integer
----@field syntax_debug {projected_files: string[], fallback_files: string[], skipped_files: table<string, string>}
 ---@field backend table|nil
 
 ---@type ZdiffReviewState
@@ -63,11 +62,6 @@ local state = {
   syntax_projection_cache = {},
   syntax_jobs = {},
   syntax_job_seq = 0,
-  syntax_debug = {
-    projected_files = {},
-    fallback_files = {},
-    skipped_files = {},
-  },
   backend = nil,
 }
 
@@ -233,7 +227,6 @@ render = function()
     syntax_requests = {},
     markers = {},
     line_map = state.line_map,
-    syntax_debug = state.syntax_debug,
   }
   if state.view == "diff" then
     rendered = view.render_diff(state, lines, highlights, {
@@ -242,7 +235,6 @@ render = function()
       map_diff_line = map_diff_line,
     })
     state.line_map = rendered.line_map or {}
-    state.syntax_debug = rendered.syntax_debug or state.syntax_debug
   else
     rendered = view.render_list(state, lines, highlights)
     state.line_map = rendered.line_map or {}
@@ -258,34 +250,6 @@ render = function()
   for _, req in ipairs(rendered.syntax_requests or {}) do
     queue_projection_cache(req)
   end
-end
-
----@param pr ZdiffReviewPr
----@param done fun()
-local function load_pr_details(pr, done)
-  if type(pr.body) == "string" then
-    done()
-    return
-  end
-
-  local read_pr = backend().read_pr
-  if not read_pr or not state.root then
-    done()
-    return
-  end
-
-  read_pr(state.root, pr.number, function(result)
-    if result.ok and type(result.data) == "table" then
-      local body = result.data.body
-      if body == nil then
-        body = result.data.description
-      end
-      if type(body) == "string" then
-        pr.body = body
-      end
-    end
-    done()
-  end)
 end
 
 ---@param pr ZdiffReviewPr
@@ -343,41 +307,28 @@ local function load_pr_diff(pr)
   state.load_error = nil
   state.syntax_projection_cache = {}
   state.syntax_jobs = {}
-  state.syntax_debug = {
-    projected_files = {},
-    fallback_files = {},
-    skipped_files = {},
-  }
   render()
 
-  load_pr_details(pr, function()
+  backend().diff_pr(state.root, pr, function(result)
     if refresh_seq ~= state.refresh_seq then
       return
     end
 
+    if result.ok then
+      state.files = {}
+      for _, file in ipairs(result.data or {}) do
+        table.insert(state.files, normalize_backend_file(file, pr))
+      end
+      state.load_error = nil
+    else
+      state.files = {}
+      state.load_error = render_error(result.error)
+    end
+    state.loading = false
     render()
-
-    backend().diff_pr(state.root, pr, function(result)
-      if refresh_seq ~= state.refresh_seq then
-        return
-      end
-
-      if result.ok then
-        state.files = {}
-        for _, file in ipairs(result.data or {}) do
-          table.insert(state.files, normalize_backend_file(file, pr))
-        end
-        state.load_error = nil
-      else
-        state.files = {}
-        state.load_error = render_error(result.error)
-      end
-      state.loading = false
-      render()
-      if result.ok then
-        load_pr_comments(pr)
-      end
-    end)
+    if result.ok then
+      load_pr_comments(pr)
+    end
   end)
 end
 
@@ -968,7 +919,6 @@ function M._debug_state()
     comments_loading = state.comments_loading,
     pending_syntax_jobs = vim.tbl_count(state.syntax_jobs),
     syntax_cache_entries = vim.tbl_count(state.syntax_projection_cache),
-    syntax = vim.deepcopy(state.syntax_debug),
     root = state.root,
   }
 end

@@ -2,12 +2,6 @@ local M = {}
 local diff = require("zdiff.diff")
 local process = require("zdiff.process")
 
-local cache_ttl = 300
-local cache = {
-  pr_files = {},
-  file_contents = {},
-}
-
 ---@param text string
 ---@return string[]
 local function split_lines(text)
@@ -20,11 +14,6 @@ local function split_lines(text)
     table.remove(lines, #lines)
   end
   return lines
-end
-
----@return integer
-local function now()
-  return os.time()
 end
 
 ---@param path string
@@ -149,7 +138,7 @@ function M.list_prs(root, done)
     "pr",
     "list",
     "--json",
-    "number,title,author,additions,deletions,reviewDecision,isDraft,baseRefOid,headRefOid",
+    "number,title,author,additions,deletions,reviewDecision,isDraft,baseRefOid,headRefOid,body",
   }, function(result)
     if not result.ok then
       done({ ok = false, error = result.error })
@@ -175,13 +164,6 @@ end
 ---@param done fun(result: {ok: boolean, data?: ZdiffFile[], error?: string})
 function M.diff_pr(root, pr, done)
   local refs = { base = pr.base_ref_oid, head = pr.head_ref_oid }
-  local cache_key =
-    table.concat({ root, tostring(pr.number), refs.base or "", refs.head or "" }, "\0")
-  local cached = cache.pr_files[cache_key]
-  if cached and cached.expires_at > now() then
-    done({ ok = true, data = vim.deepcopy(cached.data) })
-    return
-  end
 
   process.run(root, {
     "gh",
@@ -214,43 +196,7 @@ function M.diff_pr(root, pr, done)
         end
       end
     end
-    cache.pr_files[cache_key] = {
-      expires_at = now() + cache_ttl,
-      data = vim.deepcopy(files),
-    }
     done({ ok = true, data = files })
-  end)
-end
-
----@param root string
----@param number number
----@param done fun(result: {ok: boolean, data?: {body: string}, error?: string})
-function M.read_pr(root, number, done)
-  process.run(root, {
-    "gh",
-    "pr",
-    "view",
-    tostring(number),
-    "--json",
-    "body",
-  }, function(result)
-    if not result.ok then
-      done({ ok = false, error = result.error })
-      return
-    end
-
-    local ok, decoded = pcall(vim.json.decode, result.stdout)
-    if not ok or type(decoded) ~= "table" then
-      done({ ok = false, error = "could not parse PR description" })
-      return
-    end
-
-    done({
-      ok = true,
-      data = {
-        body = type(decoded.body) == "string" and decoded.body or "",
-      },
-    })
   end)
 end
 
@@ -371,13 +317,6 @@ end
 ---@param ref string
 ---@param done fun(result: {ok: boolean, data?: string[], error?: string})
 function M.read_file(root, path, ref, done)
-  local cache_key = table.concat({ root, ref, path }, "\0")
-  local cached = cache.file_contents[cache_key]
-  if cached and cached.expires_at > now() then
-    done({ ok = true, data = cached.data })
-    return
-  end
-
   process.run(root, {
     "gh",
     "api",
@@ -394,12 +333,7 @@ function M.read_file(root, path, ref, done)
       return
     end
 
-    local lines = split_lines(result.stdout)
-    cache.file_contents[cache_key] = {
-      expires_at = now() + cache_ttl,
-      data = lines,
-    }
-    done({ ok = true, data = lines })
+    done({ ok = true, data = split_lines(result.stdout) })
   end)
 end
 

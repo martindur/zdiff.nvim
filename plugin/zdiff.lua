@@ -8,43 +8,26 @@ vim.g.loaded_zdiff = true
 
 -- Git ref completion function
 local function complete_git_refs(arg_lead, _, _)
-  -- Get branches and tags
+  local refs_raw = vim.fn.systemlist({
+    "git",
+    "for-each-ref",
+    "--format=%(refname:short)",
+    "refs/heads",
+    "refs/remotes",
+    "refs/tags",
+  })
+  if vim.v.shell_error ~= 0 then
+    return {}
+  end
+
   local refs = {}
-
-  -- Local branches
-  local branches = vim.fn.systemlist("git branch --format='%(refname:short)' 2>/dev/null")
-  if vim.v.shell_error == 0 then
-    for _, branch in ipairs(branches) do
-      if branch:find(arg_lead, 1, true) == 1 then
-        table.insert(refs, branch)
-      end
+  for _, ref in ipairs(refs_raw) do
+    local short = ref:gsub("^origin/", "")
+    if short:find(arg_lead, 1, true) == 1 and not vim.tbl_contains(refs, short) then
+      table.insert(refs, short)
     end
-  end
-
-  -- Remote branches (without origin/ prefix for convenience)
-  local remote_branches =
-    vim.fn.systemlist("git branch -r --format='%(refname:short)' 2>/dev/null")
-  if vim.v.shell_error == 0 then
-    for _, branch in ipairs(remote_branches) do
-      -- Strip origin/ prefix for easier typing
-      local short = branch:gsub("^origin/", "")
-      if short:find(arg_lead, 1, true) == 1 and not vim.tbl_contains(refs, short) then
-        table.insert(refs, short)
-      end
-      -- Also include full ref
-      if branch:find(arg_lead, 1, true) == 1 then
-        table.insert(refs, branch)
-      end
-    end
-  end
-
-  -- Tags
-  local tags = vim.fn.systemlist("git tag 2>/dev/null")
-  if vim.v.shell_error == 0 then
-    for _, tag in ipairs(tags) do
-      if tag:find(arg_lead, 1, true) == 1 then
-        table.insert(refs, tag)
-      end
+    if ref:find(arg_lead, 1, true) == 1 and not vim.tbl_contains(refs, ref) then
+      table.insert(refs, ref)
     end
   end
 
@@ -59,4 +42,10 @@ end, {
   nargs = "?",
   complete = complete_git_refs,
   desc = "Open zdiff (optionally against a git ref)",
+})
+
+vim.api.nvim_create_user_command("ZdiffReview", function()
+  require("zdiff.review").open()
+end, {
+  desc = "Open zdiff review pull request browser",
 })

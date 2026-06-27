@@ -354,14 +354,6 @@ end
 ---@param root string
 ---@param base_ref string|nil
 ---@param file ZdiffGitFile
----@return {ok: boolean, data?: string[], error?: string}
-function M.file_diff_lines(root, base_ref, file)
-  return M.run_lines(root, file_diff_args(root, base_ref, file))
-end
-
----@param root string
----@param base_ref string|nil
----@param file ZdiffGitFile
 ---@param done fun(result: {ok: boolean, data?: string[], error?: string})
 function M.file_diff_lines_async(root, base_ref, file, done)
   M.run_async(root, file_diff_args(root, base_ref, file), function(result)

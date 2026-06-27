@@ -380,8 +380,6 @@ describe("zdiff.review", function()
       return review._debug_state().syntax_cache_entries == 1
     end, 20))
 
-    local syntax_state = review._debug_state().syntax or {}
-    assert.is_true(vim.tbl_contains(syntax_state.projected_files or {}, "a.lua"))
     assert.equals("base123", reads[1].ref)
     assert.equals("head123", reads[2].ref)
   end)
@@ -706,6 +704,7 @@ describe("zdiff.review", function()
               deletions = 1,
               reviewDecision = "",
               isDraft = false,
+              body = "",
             },
           }),
           stderr = "",
@@ -793,14 +792,9 @@ describe("zdiff.review", function()
               isDraft = false,
               baseRefOid = "base123",
               headRefOid = "head123",
+              body = "Default backend description",
             },
           }),
-          stderr = "",
-        })
-      elseif argv[1] == "gh" and argv[2] == "pr" and argv[3] == "view" then
-        callback({
-          code = 0,
-          stdout = vim.json.encode({ body = "Default backend description" }),
           stderr = "",
         })
       elseif argv[1] == "gh" and argv[2] == "api" then

@@ -80,10 +80,6 @@ describe("syntax highlighting", function()
 
     local checked = 0
     local skipped = {}
-    local dbg = zdiff._debug_state()
-    local syntax = dbg.syntax or {}
-    local projected_files = syntax.projected_files or {}
-    local fallback_files = syntax.fallback_files or {}
 
     for _, file in ipairs(fixtures.files) do
       local available, lang = fixtures.lang_available(file.path)
@@ -95,14 +91,6 @@ describe("syntax highlighting", function()
         assert.is_true(
           #marks > 0,
           string.format("expected syntax extmarks on %s probe line %q", file.path, line)
-        )
-        assert.is_true(
-          vim.tbl_contains(projected_files, file.path),
-          "expected projection syntax for " .. file.path
-        )
-        assert.is_false(
-          vim.tbl_contains(fallback_files, file.path),
-          "expected no hunk fallback after projection settled for " .. file.path
         )
         checked = checked + 1
       else

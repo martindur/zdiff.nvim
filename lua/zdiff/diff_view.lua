@@ -2,20 +2,6 @@ local M = {}
 local display = require("zdiff.display")
 local syntax = require("zdiff.syntax")
 
----@param value string
----@param allowed table<string, boolean>
----@param fallback string
----@return string
-local function normalize_enum(value, allowed, fallback)
-  if type(value) ~= "string" then
-    return fallback
-  end
-  if allowed[value] then
-    return value
-  end
-  return fallback
-end
-
 ---@param value any
 ---@return number
 local function normalize_non_negative_number(value)
@@ -64,37 +50,12 @@ end
 ---@param file table
 ---@return string
 function M.syntax_cache_key(prefix, file)
-  local pieces = {
+  return table.concat({
     prefix or "",
-    file.path,
-    file.display_path or "",
+    file.path or "",
     file.old_path or "",
     file.new_path or "",
-    file.review_base_ref or "",
-    file.review_head_ref or "",
-    file.status,
-    tostring(file.insertions),
-    tostring(file.deletions),
-    tostring(#file.hunks),
-  }
-  for _, hunk in ipairs(file.hunks) do
-    table.insert(
-      pieces,
-      string.format(
-        "%d:%d:%d:%d:%d",
-        hunk.old_start,
-        hunk.old_count,
-        hunk.new_start,
-        hunk.new_count,
-        #hunk.lines
-      )
-    )
-    for _, line in ipairs(hunk.lines) do
-      table.insert(pieces, line.type .. ":" .. line.text)
-    end
-  end
-  local raw = table.concat(pieces, "\n")
-  return vim.fn.sha256(raw)
+  }, "\0")
 end
 
 ---@param state table
@@ -273,7 +234,6 @@ local function render_loaded_hunks(ctx, file_idx, file)
   end
 
   if not lang then
-    ctx.syntax_debug.skipped_files[file.path] = "no treesitter language"
     return
   end
 
@@ -295,13 +255,6 @@ local function render_loaded_hunks(ctx, file_idx, file)
     add_hunk_syntax(ctx, code_lines, code_line_mapping, lang)
   end
 
-  if used_projection then
-    table.insert(ctx.syntax_debug.projected_files, file.path)
-  elseif #code_lines > 0 then
-    table.insert(ctx.syntax_debug.fallback_files, file.path)
-  else
-    ctx.syntax_debug.skipped_files[file.path] = "no diff lines"
-  end
 end
 
 ---@param opts {lines: string[], highlights: table[], syntax_highlights: table[]|nil, files: table[], icons: table, syntax: table|nil, syntax_projection_cache: table|nil, syntax_cache_prefix: string|nil, queue_hunks: fun(file_idx: number, file: table)|nil, map_diff_line: fun(mapping: table, file: table, diff_line: table)|nil, extra_file_rows: fun(ctx: table): table[]|nil, extra_rows: fun(ctx: table): table[]|nil}
@@ -324,14 +277,8 @@ function M.render(opts)
     map_diff_line = opts.map_diff_line,
     extra_file_rows = opts.extra_file_rows,
     extra_rows = opts.extra_rows,
-    syntax_debug = {
-      projected_files = {},
-      fallback_files = {},
-      skipped_files = {},
-    },
   }
-  ctx.syntax_mode =
-    normalize_enum(ctx.syntax_cfg.mode, { projection = true, hunk = true }, "projection")
+  ctx.syntax_mode = ctx.syntax_cfg.mode == "hunk" and "hunk" or "projection"
 
   for file_idx, file in ipairs(ctx.files) do
     local icon = file.expanded and ctx.icons.expanded or ctx.icons.collapsed

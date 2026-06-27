@@ -287,7 +287,6 @@ function M.render_list(state, lines, highlights)
     syntax_requests = {},
     markers = {},
     line_map = line_map,
-    syntax_debug = state.syntax_debug,
   }
 end
 
@@ -336,7 +335,6 @@ function M.render_diff(state, lines, highlights, opts)
       syntax_requests = {},
       markers = {},
       line_map = {},
-      syntax_debug = state.syntax_debug,
     }
   end
 

@@ -38,7 +38,6 @@ local winbar = require("zdiff.winbar")
 ---@field syntax_projection_cache table<string, {old: table<number, table[]>, new: table<number, table[]>}|false>
 ---@field syntax_jobs table<string, integer>
 ---@field syntax_job_seq integer
----@field syntax_debug {projected_files: string[], fallback_files: string[], skipped_files: table<string, string>}
 ---@field restore_cursor_line number|nil cursor line restored after expanded hunks reload
 
 ---@type ZdiffState
@@ -61,11 +60,6 @@ local state = {
   syntax_projection_cache = {},
   syntax_jobs = {},
   syntax_job_seq = 0,
-  syntax_debug = {
-    projected_files = {},
-    fallback_files = {},
-    skipped_files = {},
-  },
   restore_cursor_line = nil,
 }
 
@@ -448,16 +442,6 @@ render = function()
     markers = {},
     line_map = {},
     file_header_lines = {},
-    syntax_debug = {
-      projected_files = {},
-      fallback_files = {},
-      skipped_files = {},
-    },
-  }
-  local empty_syntax_debug = {
-    projected_files = {},
-    fallback_files = {},
-    skipped_files = {},
   }
 
   -- Header
@@ -503,7 +487,6 @@ render = function()
 
   state.line_map = rendered.line_map
   state.file_header_lines = rendered.file_header_lines
-  state.syntax_debug = rendered.syntax_debug or empty_syntax_debug
 
   diff_view.apply(state.buf, rendered, {
     diff = ns_diff,
@@ -1115,7 +1098,6 @@ M._debug_state = function()
     pending_render = state.render_pending,
     pending_syntax_jobs = vim.tbl_count(state.syntax_jobs),
     syntax_cache_entries = vim.tbl_count(state.syntax_projection_cache),
-    syntax = vim.deepcopy(state.syntax_debug),
   }
 end
 
