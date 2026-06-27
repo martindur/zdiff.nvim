@@ -120,6 +120,51 @@ Tab completion is available for branch and tag names.
 
 Press `?` while in zdiff to see all available keymaps.
 
+## Pull Request Reviews (opt-in)
+
+`zdiff.review` provides an API-backed GitHub PR browser without checking out
+branches or creating worktrees. It requires the
+[GitHub CLI](https://cli.github.com/) to be installed and authenticated.
+
+For lazy.nvim, include `ZdiffReview` in `cmd` and call its separate setup:
+
+```lua
+{
+  "martindur/zdiff.nvim",
+  cmd = { "Zdiff", "ZdiffReview" },
+  config = function()
+    require("zdiff").setup()
+    require("zdiff.review").setup()
+  end,
+}
+```
+
+Open it with:
+
+```vim
+:ZdiffReview
+```
+
+PR list keymaps:
+
+| Key | Action |
+|-----|--------|
+| `<CR>` | Open the selected PR |
+| `a` | Approve, request changes, or leave a general comment |
+| `R` | Refresh the PR list |
+| `q` | Close zdiff.review |
+
+PR diff keymaps:
+
+| Key | Action |
+|-----|--------|
+| `<Tab>` | Toggle the file under the cursor |
+| `c` | Comment on the diff line under the cursor |
+| `r` | Reply to the top-level comment under the cursor |
+| `]t` / `[t` | Jump to the next or previous thread |
+| `R` | Refresh the PR diff and comments |
+| `q` | Return to the PR list |
+
 ## Configuration
 
 ```lua
