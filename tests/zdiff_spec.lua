@@ -389,6 +389,55 @@ describe("zdiff", function()
       vim.api.nvim_win_close(vim.api.nvim_get_current_win(), true)
     end)
 
+    it("should preserve the cursor after returning from a source file", function()
+      local baseline = {}
+      for i = 1, 40 do
+        baseline[i] = "line " .. i
+      end
+      local changed = vim.deepcopy(baseline)
+      changed[30] = "changed target"
+      local repo = create_changed_repo(
+        "a.txt",
+        table.concat(baseline, "\n") .. "\n",
+        table.concat(changed, "\n") .. "\n"
+      )
+      zdiff.config.default_expanded = true
+
+      local calls = 0
+      local original = git.diff_files_async
+      local old_directory = vim.o.directory
+      vim.o.directory = "/tmp"
+      git.diff_files_async = function(...)
+        calls = calls + 1
+        return original(...)
+      end
+
+      local ok, err = pcall(function()
+        vim.cmd("cd " .. vim.fn.fnameescape(repo))
+        zdiff.open()
+        wait_for_loaded()
+
+        local diff_buf = vim.api.nvim_get_current_buf()
+        local target_line = assert(find_line("changed target"))
+        vim.api.nvim_win_set_cursor(0, { target_line, 0 })
+        get_normal_keymap(diff_buf, "<CR>").callback()
+
+        vim.api.nvim_win_set_buf(0, diff_buf)
+        assert.is_true(vim.wait(5000, function()
+          local dbg = zdiff._debug_state()
+          return calls >= 2
+            and not dbg.loading_files
+            and not dbg.pending_render
+            and dbg.pending_hunk_jobs == 0
+            and vim.api.nvim_win_get_cursor(0)[1] == target_line
+        end, 50))
+      end)
+      git.diff_files_async = original
+      vim.o.directory = old_directory
+
+      assert.is_true(ok, err)
+    end)
+
     it("should not open deleted files from the worktree", function()
       local repo = create_changed_repo("deleted.txt", "gone\n", "gone\n")
       run_git(repo, { "rm", "--", "deleted.txt" })
