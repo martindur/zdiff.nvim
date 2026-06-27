@@ -251,9 +251,11 @@ describe("zdiff.review", function()
     assert.is_truthy(content:find("Error loading pull requests: gh not found", 1, true))
   end)
 
-  it("opens a selected pull request diff", function()
+  it("opens a selected pull request diff and returns to the cached list", function()
+    local list_calls = 0
     review._set_backend({
       list_prs = function(_, done)
+        list_calls = list_calls + 1
         done({
           ok = true,
           data = {
@@ -312,6 +314,16 @@ describe("zdiff.review", function()
     content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
     assert.equals(0, review._debug_state().expanded_count)
     assert.is_nil(content:find("old", 1, true))
+
+    local buf = vim.api.nvim_get_current_buf()
+    local close_keymap = assert(get_normal_keymap(buf, "q"))
+    close_keymap.callback()
+    assert.equals("list", review._debug_state().view)
+    assert.equals(1, list_calls)
+    assert.is_not_nil(find_line("#12 Add review browser"))
+
+    close_keymap.callback()
+    assert.is_false(vim.api.nvim_buf_is_valid(buf))
   end)
 
   it("projects syntax from backend file contents", function()

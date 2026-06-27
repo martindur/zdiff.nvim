@@ -1725,6 +1725,27 @@ local function close()
   state.syntax_projection_cache = {}
 end
 
+local function back_or_close()
+  if state.view == "list" then
+    close()
+    return
+  end
+
+  state.refresh_seq = state.refresh_seq + 1
+  state.view = "list"
+  state.active_pr = nil
+  state.files = {}
+  state.comments = {}
+  state.posting = {}
+  state.comments_loading = false
+  state.comment_error = nil
+  state.loading = false
+  state.load_error = nil
+  state.syntax_jobs = {}
+  state.syntax_projection_cache = {}
+  render()
+end
+
 function M.open()
   local root_result = git.root()
   if not root_result.ok then
@@ -1763,7 +1784,7 @@ function M.open()
   state.win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(state.win, state.buf)
 
-  vim.keymap.set("n", "q", close, { buffer = state.buf, silent = true })
+  vim.keymap.set("n", "q", back_or_close, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "<CR>", open_selected_pr, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "a", prompt_pr_action, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "<Tab>", toggle_file, { buffer = state.buf, silent = true })
