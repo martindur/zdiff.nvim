@@ -110,4 +110,26 @@ describe("syntax module", function()
 
     assert.is_true(has_group(highlights, "@keyword"))
   end)
+
+  it("adds injected TypeScript highlights for Svelte script blocks", function()
+    if
+      not syntax.get_lang_from_filetype("svelte")
+      or not syntax.get_lang_from_filetype("typescript")
+    then
+      pending("svelte or typescript treesitter highlights are not available")
+      return
+    end
+
+    local highlights = syntax.get_highlights({
+      '<script lang="ts">',
+      "  let count: number = 0;",
+      "  $: doubled = count * 2;",
+      "</script>",
+      "",
+      "<button>{doubled}</button>",
+    }, "svelte")
+
+    assert.is_true(has_group(highlights, "@keyword"))
+    assert.is_true(has_group(highlights, "@type.builtin"))
+  end)
 end)

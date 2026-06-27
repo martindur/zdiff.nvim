@@ -22,6 +22,7 @@ local filetype_aliases = {
 local injection_providers = {
   markdown = require("zdiff.syntax.markdown"),
   python = require("zdiff.syntax.python"),
+  svelte = require("zdiff.syntax.svelte"),
 }
 
 ---@param lang string

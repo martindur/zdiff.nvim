@@ -228,6 +228,26 @@ M.files = {
     },
   },
   {
+    path = "web/example.svelte",
+    probe = "let count: number",
+    before = {
+      '<script lang="ts">',
+      "  let count: number = 0;",
+      "  $: doubled = count * 2;",
+      "</script>",
+      "",
+      "<button>{doubled}</button>",
+    },
+    after = {
+      '<script lang="ts">',
+      "  let count: number = 1;",
+      "  $: doubled = count * 2;",
+      "</script>",
+      "",
+      "<button>{doubled}</button>",
+    },
+  },
+  {
     path = "cmd/example.go",
     probe = "func RenderUser",
     before = {
