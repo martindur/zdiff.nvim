@@ -1,4 +1,5 @@
 local M = {}
+local process = require("zdiff.process")
 
 ---@class ZdiffGitResult
 ---@field ok boolean
@@ -21,15 +22,6 @@ local function git_argv(root, args)
   local argv = { "git", "-C", root }
   vim.list_extend(argv, args)
   return argv
-end
-
----@param data string[]|nil
----@return string
-local function join_job_data(data)
-  if not data then
-    return ""
-  end
-  return table.concat(data, "\n")
 end
 
 ---@param argv string[]
@@ -73,39 +65,7 @@ end
 ---@param args string[]
 ---@param callback fun(result: ZdiffGitResult)
 function M.run_async(root, args, callback)
-  local argv = git_argv(root, args)
-  if vim.system then
-    vim.system(argv, { text = true }, function(obj)
-      vim.schedule(function()
-        callback(build_result(argv, obj.code or 1, obj.stdout, obj.stderr))
-      end)
-    end)
-    return
-  end
-
-  local stdout = ""
-  local stderr = ""
-  local job_id = vim.fn.jobstart(argv, {
-    stdout_buffered = true,
-    stderr_buffered = true,
-    on_stdout = function(_, data)
-      stdout = join_job_data(data)
-    end,
-    on_stderr = function(_, data)
-      stderr = join_job_data(data)
-    end,
-    on_exit = function(_, code)
-      vim.schedule(function()
-        callback(build_result(argv, code or 1, stdout, stderr))
-      end)
-    end,
-  })
-
-  if job_id <= 0 then
-    vim.schedule(function()
-      callback(build_result(argv, 1, "", "failed to start git command"))
-    end)
-  end
+  process.run(nil, git_argv(root, args), callback)
 end
 
 ---@return {ok: boolean, data?: string, error?: string}

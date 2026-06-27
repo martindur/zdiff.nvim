@@ -94,11 +94,7 @@ function M.syntax_cache_key(prefix, file)
     end
   end
   local raw = table.concat(pieces, "\n")
-  local ok, hash = pcall(vim.fn.sha256, raw)
-  if ok and hash and hash ~= "" then
-    return hash
-  end
-  return raw
+  return vim.fn.sha256(raw)
 end
 
 ---@param state table

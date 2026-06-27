@@ -3,6 +3,7 @@ local diff = require("zdiff.diff")
 local diff_view = require("zdiff.diff_view")
 local display = require("zdiff.display")
 local git = require("zdiff.git")
+local process = require("zdiff.process")
 
 ---@class ZdiffReviewPr
 ---@field number number
@@ -86,7 +87,6 @@ local syntax_config = {
 }
 local cache_ttl = 300
 local cache = {
-  pr_refs = {},
   pr_files = {},
   file_contents = {},
 }
@@ -102,6 +102,7 @@ local cache = {
 ---@field side "LEFT"|"RIGHT"
 ---@field line number
 ---@field body string
+---@field commit_id string
 
 ---@class ZdiffReviewPostedComment
 ---@field id number|nil
@@ -118,74 +119,6 @@ end
 
 local function render_error(msg)
   return vim.trim((msg or "unknown review error"):gsub("%s+", " "))
-end
-
-local function join_job_data(data)
-  if not data then
-    return ""
-  end
-  return table.concat(data, "\n")
-end
-
----@param argv string[]
----@param code integer
----@param stdout string|nil
----@param stderr string|nil
----@return {ok: boolean, stdout: string, error: string|nil}
-local function build_result(argv, code, stdout, stderr)
-  stdout = stdout or ""
-  stderr = stderr or ""
-  if code == 0 then
-    return { ok = true, stdout = stdout, error = nil }
-  end
-
-  local err = vim.trim(stderr)
-  if err == "" then
-    err = "command failed: " .. table.concat(argv, " ")
-  end
-  return { ok = false, stdout = stdout, error = err }
-end
-
----@param root string
----@param argv string[]
----@param callback fun(result: {ok: boolean, stdout: string, error: string|nil})
-local function run_async(root, argv, callback)
-  local function finish(code, stdout, stderr)
-    vim.schedule(function()
-      callback(build_result(argv, code or 1, stdout, stderr))
-    end)
-  end
-
-  if vim.system then
-    local ok, err = pcall(vim.system, argv, { text = true, cwd = root }, function(obj)
-      finish(obj.code, obj.stdout, obj.stderr)
-    end)
-    if not ok then
-      finish(1, "", err)
-    end
-    return
-  end
-
-  local stdout = ""
-  local stderr = ""
-  local job_id = vim.fn.jobstart(argv, {
-    cwd = root,
-    stdout_buffered = true,
-    stderr_buffered = true,
-    on_stdout = function(_, data)
-      stdout = join_job_data(data)
-    end,
-    on_stderr = function(_, data)
-      stderr = join_job_data(data)
-    end,
-    on_exit = function(_, code)
-      finish(code, stdout, stderr)
-    end,
-  })
-
-  if job_id <= 0 then
-    finish(1, "", "failed to start command: " .. table.concat(argv, " "))
-  end
 end
 
 ---@param text string
@@ -215,28 +148,6 @@ local function encode_path(path)
     parts[idx] = vim.uri_encode(part)
   end
   return table.concat(parts, "/")
-end
-
----@param value any
----@return table[]
-local function flatten_pages(value)
-  local out = {}
-  if type(value) ~= "table" then
-    return out
-  end
-
-  for _, item in ipairs(value) do
-    if type(item) == "table" and item.filename then
-      table.insert(out, item)
-    elseif type(item) == "table" then
-      for _, nested in ipairs(item) do
-        if type(nested) == "table" then
-          table.insert(out, nested)
-        end
-      end
-    end
-  end
-  return out
 end
 
 ---@param raw table
@@ -297,7 +208,6 @@ end
 local function normalize_backend_file(file, pr)
   file.expanded = file.expanded == true
   file.hunk_status = file.hunk_status or "loaded"
-  file.hunk_error = file.hunk_error
   file.review_base_ref = file.review_base_ref or pr.base_ref_oid
   file.review_head_ref = file.review_head_ref or pr.head_ref_oid
   return file
@@ -327,7 +237,7 @@ end
 ---@param root string
 ---@param done fun(result: {ok: boolean, data?: ZdiffReviewPr[], error?: string})
 local function list_github_prs(root, done)
-  run_async(root, {
+  process.run(root, {
     "gh",
     "pr",
     "list",
@@ -354,105 +264,54 @@ local function list_github_prs(root, done)
 end
 
 ---@param root string
----@param number number
----@param done fun(result: {ok: boolean, data?: {base: string|nil, head: string|nil}, error?: string})
-local function get_github_pr_refs(root, number, done)
-  local ref_cache_key = root .. "\0" .. tostring(number)
-  local cached = cache.pr_refs[ref_cache_key]
+---@param pr ZdiffReviewPr
+---@param done fun(result: {ok: boolean, data?: ZdiffFile[], error?: string})
+local function diff_github_pr(root, pr, done)
+  local refs = { base = pr.base_ref_oid, head = pr.head_ref_oid }
+  local cache_key =
+    table.concat({ root, tostring(pr.number), refs.base or "", refs.head or "" }, "\0")
+  local cached = cache.pr_files[cache_key]
   if cached and cached.expires_at > now() then
-    done({ ok = true, data = cached.data })
+    done({ ok = true, data = vim.deepcopy(cached.data) })
     return
   end
 
-  run_async(root, {
+  process.run(root, {
     "gh",
-    "pr",
-    "view",
-    tostring(number),
-    "--json",
-    "baseRefOid,headRefOid",
+    "api",
+    "--paginate",
+    "--slurp",
+    "--method",
+    "GET",
+    "repos/{owner}/{repo}/pulls/" .. tostring(pr.number) .. "/files",
+    "-F",
+    "per_page=100",
   }, function(result)
     if not result.ok then
       done({ ok = false, error = result.error })
       return
     end
 
-    local ok, decoded = pcall(vim.json.decode, result.stdout)
-    if not ok or type(decoded) ~= "table" then
-      done({ ok = false, error = "could not parse PR refs" })
+    local ok, pages = pcall(vim.json.decode, result.stdout)
+    if not ok or type(pages) ~= "table" then
+      done({ ok = false, error = "could not parse PR files" })
       return
     end
 
-    local refs = {
-      base = type(decoded.baseRefOid) == "string" and decoded.baseRefOid or nil,
-      head = type(decoded.headRefOid) == "string" and decoded.headRefOid or nil,
-    }
-    cache.pr_refs[ref_cache_key] = {
-      expires_at = now() + cache_ttl,
-      data = refs,
-    }
-    done({ ok = true, data = refs })
-  end)
-end
-
----@param root string
----@param number number
----@param done fun(result: {ok: boolean, data?: ZdiffFile[], error?: string})
-local function diff_github_pr(root, number, done)
-  get_github_pr_refs(root, number, function(ref_result)
-    if not ref_result.ok then
-      done({ ok = false, error = ref_result.error })
-      return
-    end
-
-    local refs = ref_result.data or {}
-    local cache_key = table.concat({
-      root,
-      tostring(number),
-      refs.base or "",
-      refs.head or "",
-    }, "\0")
-    local cached = cache.pr_files[cache_key]
-    if cached and cached.expires_at > now() then
-      done({ ok = true, data = vim.deepcopy(cached.data) })
-      return
-    end
-
-    run_async(root, {
-      "gh",
-      "api",
-      "--paginate",
-      "--slurp",
-      "--method",
-      "GET",
-      "repos/{owner}/{repo}/pulls/" .. tostring(number) .. "/files",
-      "-F",
-      "per_page=100",
-    }, function(result)
-      if not result.ok then
-        done({ ok = false, error = result.error })
-        return
-      end
-
-      local ok, decoded = pcall(vim.json.decode, result.stdout)
-      if not ok then
-        done({ ok = false, error = "could not parse PR files" })
-        return
-      end
-
-      local files = {}
-      for _, raw in ipairs(flatten_pages(decoded)) do
+    local files = {}
+    for _, page in ipairs(pages) do
+      for _, raw in ipairs(page) do
         local file = normalize_pr_file(raw, refs)
         if file then
           table.insert(files, file)
         end
       end
-      cache.pr_files[cache_key] = {
-        expires_at = now() + cache_ttl,
-        data = vim.deepcopy(files),
-      }
-      done({ ok = true, data = files })
-    end)
+    end
+    cache.pr_files[cache_key] = {
+      expires_at = now() + cache_ttl,
+      data = vim.deepcopy(files),
+    }
+    done({ ok = true, data = files })
   end)
 end
 
@@ -485,7 +344,7 @@ end
 ---@param number number
 ---@param done fun(result: {ok: boolean, data?: ZdiffReviewPostedComment[], error?: string})
 local function list_github_comments(root, number, done)
-  run_async(root, {
+  process.run(root, {
     "gh",
     "api",
     "repos/{owner}/{repo}/pulls/" .. tostring(number) .. "/comments",
@@ -517,54 +376,26 @@ end
 ---@param comment ZdiffReviewComment
 ---@param done fun(result: {ok: boolean, error?: string})
 local function submit_github_comment(root, number, comment, done)
-  run_async(root, {
+  process.run(root, {
     "gh",
-    "pr",
-    "view",
-    tostring(number),
-    "--json",
-    "headRefOid",
-    "--jq",
-    ".headRefOid",
-  }, function(view_result)
-    if not view_result.ok then
-      done({ ok = false, error = view_result.error })
-      return
-    end
-
-    local commit_id = vim.trim(view_result.stdout)
-    if commit_id == "" then
-      done({ ok = false, error = "could not resolve PR head commit" })
-      return
-    end
-
-    run_async(root, {
-      "gh",
-      "api",
-      "--method",
-      "POST",
-      "repos/{owner}/{repo}/pulls/" .. tostring(number) .. "/comments",
-      "-H",
-      "Accept: application/vnd.github+json",
-      "-f",
-      "body=" .. comment.body,
-      "-f",
-      "commit_id=" .. commit_id,
-      "-f",
-      "path=" .. comment.path,
-      "-f",
-      "side=" .. comment.side,
-      "-F",
-      "line=" .. tostring(comment.line),
-      "--silent",
-    }, function(api_result)
-      if not api_result.ok then
-        done({ ok = false, error = api_result.error })
-        return
-      end
-      done({ ok = true })
-    end)
-  end)
+    "api",
+    "--method",
+    "POST",
+    "repos/{owner}/{repo}/pulls/" .. tostring(number) .. "/comments",
+    "-H",
+    "Accept: application/vnd.github+json",
+    "-f",
+    "body=" .. comment.body,
+    "-f",
+    "commit_id=" .. comment.commit_id,
+    "-f",
+    "path=" .. comment.path,
+    "-f",
+    "side=" .. comment.side,
+    "-F",
+    "line=" .. tostring(comment.line),
+    "--silent",
+  }, done)
 end
 
 ---@param root string
@@ -573,7 +404,7 @@ end
 ---@param body string
 ---@param done fun(result: {ok: boolean, error?: string})
 local function submit_github_reply(root, number, comment_id, body, done)
-  run_async(root, {
+  process.run(root, {
     "gh",
     "api",
     "--method",
@@ -586,13 +417,7 @@ local function submit_github_reply(root, number, comment_id, body, done)
     "-f",
     "body=" .. body,
     "--silent",
-  }, function(api_result)
-    if not api_result.ok then
-      done({ ok = false, error = api_result.error })
-      return
-    end
-    done({ ok = true })
-  end)
+  }, done)
 end
 
 ---@param root string
@@ -601,25 +426,15 @@ end
 ---@param body string
 ---@param done fun(result: {ok: boolean, error?: string})
 local function submit_github_review(root, number, action, body, done)
-  local argv = {
+  process.run(root, {
     "gh",
-    "api",
-    "--method",
-    "POST",
-    "repos/{owner}/{repo}/pulls/" .. tostring(number) .. "/reviews",
-    "-H",
-    "Accept: application/vnd.github+json",
-    "-f",
-    "event=" .. (action == "approve" and "APPROVE" or "REQUEST_CHANGES"),
-  }
-  if body ~= "" then
-    vim.list_extend(argv, { "-f", "body=" .. body })
-  end
-  table.insert(argv, "--silent")
-
-  run_async(root, argv, function(result)
-    done({ ok = result.ok, error = result.error })
-  end)
+    "pr",
+    "review",
+    tostring(number),
+    action == "approve" and "--approve" or "--request-changes",
+    "--body",
+    body,
+  }, done)
 end
 
 ---@param root string
@@ -627,20 +442,14 @@ end
 ---@param body string
 ---@param done fun(result: {ok: boolean, error?: string})
 local function submit_github_pr_comment(root, number, body, done)
-  run_async(root, {
+  process.run(root, {
     "gh",
-    "api",
-    "--method",
-    "POST",
-    "repos/{owner}/{repo}/issues/" .. tostring(number) .. "/comments",
-    "-H",
-    "Accept: application/vnd.github+json",
-    "-f",
-    "body=" .. body,
-    "--silent",
-  }, function(result)
-    done({ ok = result.ok, error = result.error })
-  end)
+    "pr",
+    "comment",
+    tostring(number),
+    "--body",
+    body,
+  }, done)
 end
 
 ---@param root string
@@ -655,7 +464,7 @@ local function read_github_file(root, path, ref, done)
     return
   end
 
-  run_async(root, {
+  process.run(root, {
     "gh",
     "api",
     "--method",
@@ -1236,7 +1045,7 @@ local function load_pr_diff(pr)
   }
   render()
 
-  backend().diff_pr(state.root, pr.number, function(result)
+  backend().diff_pr(state.root, pr, function(result)
     if refresh_seq ~= state.refresh_seq then
       return
     end
@@ -1619,6 +1428,7 @@ local function post_comment(target, body)
     side = target.side,
     line = target.line,
     body = body,
+    commit_id = pr.head_ref_oid,
   }, function(result)
     state.posting[key] = nil
     if result.ok then
@@ -1751,12 +1561,7 @@ local function back_or_close()
   state.files = {}
   state.comments = {}
   state.posting = {}
-  state.comments_loading = false
-  state.comment_error = nil
   state.loading = false
-  state.load_error = nil
-  state.syntax_jobs = {}
-  state.syntax_projection_cache = {}
   render()
 end
 

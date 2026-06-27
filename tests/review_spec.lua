@@ -1,5 +1,5 @@
 local review = require("zdiff.review")
-local patch = require("zdiff.patch")
+local diff = require("zdiff.diff")
 
 local function run_git(repo, args)
   local argv = { "git", "-C", repo }
@@ -74,6 +74,39 @@ local function expand_file(text)
   toggle_keymap.callback()
 end
 
+local function review_file(path, lines)
+  return {
+    path = path,
+    display_path = path,
+    old_path = path,
+    new_path = path,
+    status = "M",
+    insertions = 1,
+    deletions = 1,
+    hunks = diff.parse_hunks(lines),
+  }
+end
+
+local function review_backend(methods, pr)
+  pr = vim.tbl_extend("force", {
+    number = 12,
+    title = "Add review browser",
+    author = "dur",
+    additions = 1,
+    deletions = 1,
+    review_decision = "",
+    is_draft = false,
+    base_ref_oid = "base123",
+    head_ref_oid = "head123",
+  }, pr or {})
+
+  return vim.tbl_extend("force", {
+    list_prs = function(_, done)
+      done({ ok = true, data = { pr } })
+    end,
+  }, methods or {})
+end
+
 describe("zdiff.review", function()
   local plugin_root
 
@@ -101,24 +134,7 @@ describe("zdiff.review", function()
   end)
 
   it("renders pull requests from the backend", function()
-    review._set_backend({
-      list_prs = function(_, done)
-        done({
-          ok = true,
-          data = {
-            {
-              number = 12,
-              title = "Add review browser",
-              author = "dur",
-              additions = 10,
-              deletions = 2,
-              review_decision = "",
-              is_draft = false,
-            },
-          },
-        })
-      end,
-    })
+    review._set_backend(review_backend(nil, { additions = 10, deletions = 2 }))
 
     review.open()
     wait_for_loaded()
@@ -138,23 +154,7 @@ describe("zdiff.review", function()
     local reviews = {}
     local comments = {}
     local finish_approval = nil
-    review._set_backend({
-      list_prs = function(_, done)
-        done({
-          ok = true,
-          data = {
-            {
-              number = 12,
-              title = "Add review browser",
-              author = "dur",
-              additions = 10,
-              deletions = 2,
-              review_decision = "",
-              is_draft = false,
-            },
-          },
-        })
-      end,
+    review._set_backend(review_backend({
       diff_pr = function(_, _, done)
         done({ ok = true, data = {} })
       end,
@@ -170,7 +170,7 @@ describe("zdiff.review", function()
         table.insert(comments, { number = number, body = body })
         done({ ok = true })
       end,
-    })
+    }, { additions = 10, deletions = 2 }))
 
     review.open()
     wait_for_loaded()
@@ -271,19 +271,18 @@ describe("zdiff.review", function()
           },
         })
       end,
-      diff_pr = function(_, number, done)
-        assert.equals(12, number)
+      diff_pr = function(_, pr, done)
+        assert.equals(12, pr.number)
         done({
           ok = true,
-          data = patch.parse({
-            "diff --git a/a.txt b/a.txt",
-            "--- a/a.txt",
-            "+++ b/a.txt",
-            "@@ -1,2 +1,2 @@",
-            " same",
-            "-old",
-            "+new",
-          }),
+          data = {
+            review_file("a.txt", {
+              "@@ -1,2 +1,2 @@",
+              " same",
+              "-old",
+              "+new",
+            }),
+          },
         })
       end,
     })
@@ -328,37 +327,18 @@ describe("zdiff.review", function()
 
   it("projects syntax from backend file contents", function()
     local reads = {}
-    review._set_backend({
-      list_prs = function(_, done)
-        done({
-          ok = true,
-          data = {
-            {
-              number = 12,
-              title = "Add review browser",
-              author = "dur",
-              additions = 1,
-              deletions = 1,
-              review_decision = "",
-              is_draft = false,
-              base_ref_oid = "base123",
-              head_ref_oid = "head123",
-            },
-          },
-        })
-      end,
+    review._set_backend(review_backend({
       diff_pr = function(_, _, done)
         done({
           ok = true,
-          data = patch.parse({
-            "diff --git a/a.lua b/a.lua",
-            "--- a/a.lua",
-            "+++ b/a.lua",
-            "@@ -1,2 +1,2 @@",
-            " local value = 1",
-            "-return value",
-            "+return value + 1",
-          }),
+          data = {
+            review_file("a.lua", {
+              "@@ -1,2 +1,2 @@",
+              " local value = 1",
+              "-return value",
+              "+return value + 1",
+            }),
+          },
         })
       end,
       read_file = function(_, path, ref, done)
@@ -369,7 +349,7 @@ describe("zdiff.review", function()
           done({ ok = true, data = { "local value = 1", "return value + 1" } })
         end
       end,
-    })
+    }, { base_ref_oid = "base123", head_ref_oid = "head123" }))
 
     review.open()
     wait_for_loaded()
@@ -390,42 +370,25 @@ describe("zdiff.review", function()
 
   it("posts prompted comments through the backend", function()
     local submitted = nil
-    review._set_backend({
-      list_prs = function(_, done)
-        done({
-          ok = true,
-          data = {
-            {
-              number = 12,
-              title = "Add review browser",
-              author = "dur",
-              additions = 1,
-              deletions = 1,
-              review_decision = "",
-              is_draft = false,
-            },
-          },
-        })
-      end,
+    review._set_backend(review_backend({
       diff_pr = function(_, _, done)
         done({
           ok = true,
-          data = patch.parse({
-            "diff --git a/a.txt b/a.txt",
-            "--- a/a.txt",
-            "+++ b/a.txt",
-            "@@ -1,2 +1,2 @@",
-            " same",
-            "-old",
-            "+new",
-          }),
+          data = {
+            review_file("a.txt", {
+              "@@ -1,2 +1,2 @@",
+              " same",
+              "-old",
+              "+new",
+            }),
+          },
         })
       end,
       submit_comment = function(_, number, comment, done)
         submitted = { number = number, comment = comment }
         done({ ok = true })
       end,
-    })
+    }))
 
     review.open()
     wait_for_loaded()
@@ -452,45 +415,29 @@ describe("zdiff.review", function()
     assert.equals("RIGHT", submitted.comment.side)
     assert.equals(2, submitted.comment.line)
     assert.equals("Needs follow-up", submitted.comment.body)
+    assert.equals("head123", submitted.comment.commit_id)
   end)
 
   it("shows posting state and blocks duplicate posts", function()
     local calls = 0
-    review._set_backend({
-      list_prs = function(_, done)
-        done({
-          ok = true,
-          data = {
-            {
-              number = 12,
-              title = "Add review browser",
-              author = "dur",
-              additions = 1,
-              deletions = 1,
-              review_decision = "",
-              is_draft = false,
-            },
-          },
-        })
-      end,
+    review._set_backend(review_backend({
       diff_pr = function(_, _, done)
         done({
           ok = true,
-          data = patch.parse({
-            "diff --git a/a.txt b/a.txt",
-            "--- a/a.txt",
-            "+++ b/a.txt",
-            "@@ -1,2 +1,2 @@",
-            " same",
-            "-old",
-            "+new",
-          }),
+          data = {
+            review_file("a.txt", {
+              "@@ -1,2 +1,2 @@",
+              " same",
+              "-old",
+              "+new",
+            }),
+          },
         })
       end,
       submit_comment = function()
         calls = calls + 1
       end,
-    })
+    }))
 
     review.open()
     wait_for_loaded()
@@ -520,35 +467,18 @@ describe("zdiff.review", function()
 
   it("replies to a top-level comment through the backend", function()
     local reply = nil
-    review._set_backend({
-      list_prs = function(_, done)
-        done({
-          ok = true,
-          data = {
-            {
-              number = 12,
-              title = "Add review browser",
-              author = "dur",
-              additions = 1,
-              deletions = 1,
-              review_decision = "",
-              is_draft = false,
-            },
-          },
-        })
-      end,
+    review._set_backend(review_backend({
       diff_pr = function(_, _, done)
         done({
           ok = true,
-          data = patch.parse({
-            "diff --git a/a.txt b/a.txt",
-            "--- a/a.txt",
-            "+++ b/a.txt",
-            "@@ -1,2 +1,2 @@",
-            " same",
-            "-old",
-            "+new",
-          }),
+          data = {
+            review_file("a.txt", {
+              "@@ -1,2 +1,2 @@",
+              " same",
+              "-old",
+              "+new",
+            }),
+          },
         })
       end,
       list_comments = function(_, _, done)
@@ -570,7 +500,7 @@ describe("zdiff.review", function()
         reply = { number = number, comment_id = comment_id, body = body }
         done({ ok = true })
       end,
-    })
+    }))
 
     review.open()
     wait_for_loaded()
@@ -600,35 +530,18 @@ describe("zdiff.review", function()
   end)
 
   it("loads posted comments through the backend", function()
-    review._set_backend({
-      list_prs = function(_, done)
-        done({
-          ok = true,
-          data = {
-            {
-              number = 12,
-              title = "Add review browser",
-              author = "dur",
-              additions = 1,
-              deletions = 1,
-              review_decision = "",
-              is_draft = false,
-            },
-          },
-        })
-      end,
+    review._set_backend(review_backend({
       diff_pr = function(_, _, done)
         done({
           ok = true,
-          data = patch.parse({
-            "diff --git a/a.txt b/a.txt",
-            "--- a/a.txt",
-            "+++ b/a.txt",
-            "@@ -1,2 +1,2 @@",
-            " same",
-            "-old",
-            "+new",
-          }),
+          data = {
+            review_file("a.txt", {
+              "@@ -1,2 +1,2 @@",
+              " same",
+              "-old",
+              "+new",
+            }),
+          },
         })
       end,
       list_comments = function(_, _, done)
@@ -655,7 +568,7 @@ describe("zdiff.review", function()
           },
         })
       end,
-    })
+    }))
 
     review.open()
     wait_for_loaded()
@@ -675,42 +588,24 @@ describe("zdiff.review", function()
   end)
 
   it("summarizes collapsed threads and jumps between them", function()
-    review._set_backend({
-      list_prs = function(_, done)
-        done({
-          ok = true,
-          data = {
-            {
-              number = 12,
-              title = "Add review browser",
-              author = "dur",
-              additions = 2,
-              deletions = 2,
-              review_decision = "",
-              is_draft = false,
-            },
-          },
-        })
-      end,
+    review._set_backend(review_backend({
       diff_pr = function(_, _, done)
         done({
           ok = true,
-          data = patch.parse({
-            "diff --git a/a.txt b/a.txt",
-            "--- a/a.txt",
-            "+++ b/a.txt",
-            "@@ -1,2 +1,2 @@",
-            " same",
-            "-old",
-            "+new",
-            "diff --git a/b.txt b/b.txt",
-            "--- a/b.txt",
-            "+++ b/b.txt",
-            "@@ -1,2 +1,2 @@",
-            " same",
-            "-before",
-            "+after",
-          }),
+          data = {
+            review_file("a.txt", {
+              "@@ -1,2 +1,2 @@",
+              " same",
+              "-old",
+              "+new",
+            }),
+            review_file("b.txt", {
+              "@@ -1,2 +1,2 @@",
+              " same",
+              "-before",
+              "+after",
+            }),
+          },
         })
       end,
       list_comments = function(_, _, done)
@@ -745,7 +640,7 @@ describe("zdiff.review", function()
           },
         })
       end,
-    })
+    }, { additions = 2, deletions = 2 }))
 
     review.open()
     wait_for_loaded()
@@ -776,7 +671,7 @@ describe("zdiff.review", function()
     assert.is_truthy(current_line():find("@dur: First thread", 1, true))
   end)
 
-  it("posts PR actions with gh api in the default backend", function()
+  it("posts PR actions with gh in the default backend", function()
     local old_system = vim.system
     local calls = {}
     vim.system = function(argv, _, callback)
@@ -797,7 +692,11 @@ describe("zdiff.review", function()
           }),
           stderr = "",
         })
-      elseif argv[1] == "gh" and argv[2] == "api" then
+      elseif
+        argv[1] == "gh"
+        and argv[2] == "pr"
+        and (argv[3] == "review" or argv[3] == "comment")
+      then
         callback({ code = 0, stdout = "", stderr = "" })
       else
         callback({ code = 1, stdout = "", stderr = "unexpected command" })
@@ -838,21 +737,21 @@ describe("zdiff.review", function()
     local request_changes = nil
     local comment = nil
     for _, call in ipairs(calls) do
-      if contains_arg(call, "event=APPROVE") then
+      if call[3] == "review" and contains_arg(call, "--approve") then
         approve = call
-      elseif contains_arg(call, "event=REQUEST_CHANGES") then
+      elseif call[3] == "review" and contains_arg(call, "--request-changes") then
         request_changes = call
-      elseif contains_arg(call, "repos/{owner}/{repo}/issues/12/comments") then
+      elseif call[3] == "comment" then
         comment = call
       end
     end
 
     assert.is_not_nil(approve)
-    assert.is_true(contains_arg(approve, "body=Looks good"))
+    assert.is_true(contains_arg(approve, "Looks good"))
     assert.is_not_nil(request_changes)
-    assert.is_true(contains_arg(request_changes, "body=Please fix this"))
+    assert.is_true(contains_arg(request_changes, "Please fix this"))
     assert.is_not_nil(comment)
-    assert.is_true(contains_arg(comment, "body=FYI"))
+    assert.is_true(contains_arg(comment, "FYI"))
   end)
 
   it("posts comments and replies with gh api in the default backend", function()
@@ -880,19 +779,6 @@ describe("zdiff.review", function()
           }),
           stderr = "",
         })
-      elseif argv[1] == "gh" and argv[2] == "pr" and argv[3] == "view" then
-        if contains_arg(argv, "baseRefOid,headRefOid") then
-          callback({
-            code = 0,
-            stdout = vim.json.encode({
-              baseRefOid = "base123",
-              headRefOid = "head123",
-            }),
-            stderr = "",
-          })
-        else
-          callback({ code = 0, stdout = "abc123\n", stderr = "" })
-        end
       elseif argv[1] == "gh" and argv[2] == "api" then
         if contains_arg(argv, "repos/{owner}/{repo}/pulls/12/files") then
           callback({
@@ -1025,7 +911,7 @@ describe("zdiff.review", function()
     assert.is_not_nil(api_call)
     assert.is_true(contains_arg(api_call, "repos/{owner}/{repo}/pulls/12/comments"))
     assert.is_true(contains_arg(api_call, "body=Needs follow-up"))
-    assert.is_true(contains_arg(api_call, "commit_id=abc123"))
+    assert.is_true(contains_arg(api_call, "commit_id=head123"))
     assert.is_true(contains_arg(api_call, "path=a.txt"))
     assert.is_true(contains_arg(api_call, "side=RIGHT"))
     assert.is_true(contains_arg(api_call, "line=2"))
