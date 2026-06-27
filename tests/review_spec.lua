@@ -1,23 +1,9 @@
 local review = require("zdiff.review")
 local diff = require("zdiff.diff")
 local syntax = require("zdiff.syntax")
-
-local function run_git(repo, args)
-  local argv = { "git", "-C", repo }
-  vim.list_extend(argv, args)
-  local out = vim.fn.system(argv)
-  if vim.v.shell_error ~= 0 then
-    error("git command failed: " .. table.concat(argv, " ") .. "\n" .. out)
-  end
-  return out
-end
-
-local function create_repo()
-  local repo = vim.fn.tempname()
-  vim.fn.mkdir(repo, "p")
-  run_git(repo, { "init" })
-  return repo
-end
+local buffer = require("tests.helpers.buffer")
+local git_repo = require("tests.helpers.git_repo")
+local syntax_marks = require("tests.helpers.syntax_marks")
 
 local function wait_for_loaded()
   local ok = vim.wait(1000, function()
@@ -26,76 +12,10 @@ local function wait_for_loaded()
   assert.is_true(ok, "timed out waiting for review PRs to load")
 end
 
-local function get_normal_keymap(buf, lhs)
-  for _, km in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
-    if km.lhs == lhs then
-      return km
-    end
-  end
-  return nil
-end
-
-local function find_line(text)
-  local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
-  for i, line in ipairs(lines) do
-    if line:find(text, 1, true) then
-      return i
-    end
-  end
-  return nil
-end
-
-local function current_line()
-  local lnum = vim.api.nvim_win_get_cursor(0)[1]
-  return vim.api.nvim_buf_get_lines(0, lnum - 1, lnum, false)[1]
-end
-
-local function contains_arg(argv, value)
-  for _, arg in ipairs(argv) do
-    if arg == value then
-      return true
-    end
-  end
-  return false
-end
-
-local function list_contains(values, needle)
-  for _, value in ipairs(values) do
-    if value == needle then
-      return true
-    end
-  end
-  return false
-end
-
-local function syntax_marks_for_line(buf, ns, row)
-  local marks = vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })
-  local found = {}
-  for _, mark in ipairs(marks) do
-    if mark[2] == row then
-      table.insert(found, mark)
-    end
-  end
-  return found
-end
-
-local function marks_have_group_prefix(marks, prefix)
-  for _, mark in ipairs(marks) do
-    local details = mark[4] or {}
-    if
-      type(details.hl_group) == "string"
-      and details.hl_group:find(prefix, 1, true) == 1
-    then
-      return true
-    end
-  end
-  return false
-end
-
 local function expand_file(text)
-  local toggle_keymap = get_normal_keymap(vim.api.nvim_get_current_buf(), "<Tab>")
+  local toggle_keymap = buffer.normal_keymap(vim.api.nvim_get_current_buf(), "<Tab>")
   assert.is_not_nil(toggle_keymap)
-  vim.api.nvim_win_set_cursor(0, { assert(find_line(text or "a.txt")), 0 })
+  vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line(text or "a.txt")), 0 })
   toggle_keymap.callback()
 end
 
@@ -138,7 +58,7 @@ describe("zdiff.review", function()
   before_each(function()
     plugin_root = vim.fn.getcwd()
     pcall(vim.api.nvim_del_user_command, "ZdiffReview")
-    vim.cmd("cd " .. vim.fn.fnameescape(create_repo()))
+    vim.cmd("cd " .. vim.fn.fnameescape(git_repo.create()))
   end)
 
   after_each(function()
@@ -199,7 +119,7 @@ describe("zdiff.review", function()
 
     review.open()
     wait_for_loaded()
-    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
+    vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("#12")), 0 })
 
     local choices = {
       "Approve",
@@ -220,10 +140,10 @@ describe("zdiff.review", function()
     end
 
     local ok, err = pcall(function()
-      local action = assert(get_normal_keymap(vim.api.nvim_get_current_buf(), "a"))
+      local action = assert(buffer.normal_keymap(vim.api.nvim_get_current_buf(), "a"))
       action.callback()
       assert.equals(12, review._debug_state().pr_action_pending)
-      assert.is_not_nil(find_line("submitting..."))
+      assert.is_not_nil(buffer.find_line("submitting..."))
 
       action.callback()
       assert.equals(1, #reviews)
@@ -250,8 +170,8 @@ describe("zdiff.review", function()
       assert.equals(2, #reviews)
       assert.equals(1, #comments)
 
-      vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
-      get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+      vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("#12")), 0 })
+      buffer.normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
       wait_for_loaded()
       action.callback()
       assert.equals(2, #reviews)
@@ -315,9 +235,9 @@ describe("zdiff.review", function()
     review.open()
     wait_for_loaded()
 
-    local open_keymap = get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>")
+    local open_keymap = buffer.normal_keymap(vim.api.nvim_get_current_buf(), "<CR>")
     assert.is_not_nil(open_keymap)
-    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
+    vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("#12")), 0 })
     open_keymap.callback()
     wait_for_loaded()
 
@@ -333,18 +253,18 @@ describe("zdiff.review", function()
     assert.is_truthy(content:find("old", 1, true))
     assert.is_truthy(content:find("new", 1, true))
 
-    vim.api.nvim_win_set_cursor(0, { assert(find_line("new")), 0 })
-    get_normal_keymap(vim.api.nvim_get_current_buf(), "<Tab>").callback()
+    vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("new")), 0 })
+    buffer.normal_keymap(vim.api.nvim_get_current_buf(), "<Tab>").callback()
     content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
     assert.equals(0, review._debug_state().expanded_count)
     assert.is_nil(content:find("old", 1, true))
 
     local buf = vim.api.nvim_get_current_buf()
-    local close_keymap = assert(get_normal_keymap(buf, "q"))
+    local close_keymap = assert(buffer.normal_keymap(buf, "q"))
     close_keymap.callback()
     assert.equals("list", review._debug_state().view)
     assert.equals(1, list_calls)
-    assert.is_not_nil(find_line("#12 Add review browser"))
+    assert.is_not_nil(buffer.find_line("#12 Add review browser"))
 
     close_keymap.callback()
     assert.is_false(vim.api.nvim_buf_is_valid(buf))
@@ -382,8 +302,8 @@ describe("zdiff.review", function()
 
     review.open()
     wait_for_loaded()
-    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
-    get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+    vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("#12")), 0 })
+    buffer.normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
     wait_for_loaded()
 
     local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
@@ -393,7 +313,7 @@ describe("zdiff.review", function()
     assert.is_truthy(content:find("... 2 more description lines", 1, true))
     assert.is_nil(content:find("Hidden 9", 1, true))
 
-    local description_keymap = assert(get_normal_keymap(vim.api.nvim_get_current_buf(), "d"))
+    local description_keymap = assert(buffer.normal_keymap(vim.api.nvim_get_current_buf(), "d"))
     description_keymap.callback()
 
     content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
@@ -405,20 +325,20 @@ describe("zdiff.review", function()
     if syntax.get_lang_from_filetype("markdown") then
       local ns = vim.api.nvim_get_namespaces().zdiff_review_syntax
       assert.is_not_nil(ns, "zdiff_review_syntax namespace should exist")
-      local marks = syntax_marks_for_line(
+      local marks = syntax_marks.for_line(
         vim.api.nvim_get_current_buf(),
         ns,
-        assert(find_line("# Summary")) - 1
+        assert(buffer.find_line("# Summary")) - 1
       )
-      assert.is_true(marks_have_group_prefix(marks, "@markup.heading"))
+      assert.is_true(syntax_marks.has_group_prefix(marks, "@markup.heading"))
 
       if syntax.get_lang_from_filetype("markdown_inline") then
-        marks = syntax_marks_for_line(
+        marks = syntax_marks.for_line(
           vim.api.nvim_get_current_buf(),
           ns,
-          assert(find_line("`Visible 2`")) - 1
+          assert(buffer.find_line("`Visible 2`")) - 1
         )
-        assert.is_true(marks_have_group_prefix(marks, "@markup.raw"))
+        assert.is_true(syntax_marks.has_group_prefix(marks, "@markup.raw"))
       end
     end
   end)
@@ -451,8 +371,8 @@ describe("zdiff.review", function()
 
     review.open()
     wait_for_loaded()
-    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
-    get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+    vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("#12")), 0 })
+    buffer.normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
     wait_for_loaded()
     expand_file("a.lua")
 
@@ -461,7 +381,7 @@ describe("zdiff.review", function()
     end, 20))
 
     local syntax_state = review._debug_state().syntax or {}
-    assert.is_true(list_contains(syntax_state.projected_files or {}, "a.lua"))
+    assert.is_true(vim.tbl_contains(syntax_state.projected_files or {}, "a.lua"))
     assert.equals("base123", reads[1].ref)
     assert.equals("head123", reads[2].ref)
   end)
@@ -490,8 +410,8 @@ describe("zdiff.review", function()
 
     review.open()
     wait_for_loaded()
-    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
-    get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+    vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("#12")), 0 })
+    buffer.normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
     wait_for_loaded()
     expand_file("a.txt")
 
@@ -502,8 +422,8 @@ describe("zdiff.review", function()
     end
 
     local ok, err = pcall(function()
-      vim.api.nvim_win_set_cursor(0, { assert(find_line("new")), 0 })
-      get_normal_keymap(vim.api.nvim_get_current_buf(), "c").callback()
+      vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("new")), 0 })
+      buffer.normal_keymap(vim.api.nvim_get_current_buf(), "c").callback()
     end)
     vim.ui.input = old_input
 
@@ -539,8 +459,8 @@ describe("zdiff.review", function()
 
     review.open()
     wait_for_loaded()
-    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
-    get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+    vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("#12")), 0 })
+    buffer.normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
     wait_for_loaded()
     expand_file("a.txt")
 
@@ -550,9 +470,9 @@ describe("zdiff.review", function()
     end
 
     local ok, err = pcall(function()
-      vim.api.nvim_win_set_cursor(0, { assert(find_line("new")), 0 })
-      get_normal_keymap(vim.api.nvim_get_current_buf(), "c").callback()
-      get_normal_keymap(vim.api.nvim_get_current_buf(), "c").callback()
+      vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("new")), 0 })
+      buffer.normal_keymap(vim.api.nvim_get_current_buf(), "c").callback()
+      buffer.normal_keymap(vim.api.nvim_get_current_buf(), "c").callback()
     end)
     vim.ui.input = old_input
 
@@ -602,8 +522,8 @@ describe("zdiff.review", function()
 
     review.open()
     wait_for_loaded()
-    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
-    get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+    vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("#12")), 0 })
+    buffer.normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
     assert.is_true(vim.wait(1000, function()
       return review._debug_state().comment_count == 1
     end, 20))
@@ -616,8 +536,8 @@ describe("zdiff.review", function()
     end
 
     local ok, err = pcall(function()
-      vim.api.nvim_win_set_cursor(0, { assert(find_line("@dur: Already posted")), 0 })
-      get_normal_keymap(vim.api.nvim_get_current_buf(), "r").callback()
+      vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("@dur: Already posted")), 0 })
+      buffer.normal_keymap(vim.api.nvim_get_current_buf(), "r").callback()
     end)
     vim.ui.input = old_input
 
@@ -670,8 +590,8 @@ describe("zdiff.review", function()
 
     review.open()
     wait_for_loaded()
-    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
-    get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+    vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("#12")), 0 })
+    buffer.normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
 
     assert.is_true(vim.wait(1000, function()
       return review._debug_state().comment_count == 1
@@ -742,8 +662,8 @@ describe("zdiff.review", function()
 
     review.open()
     wait_for_loaded()
-    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
-    get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+    vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("#12")), 0 })
+    buffer.normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
     assert.is_true(vim.wait(1000, function()
       return review._debug_state().comment_count == 2
     end, 20))
@@ -753,20 +673,20 @@ describe("zdiff.review", function()
     assert.is_truthy(content:find("1 thread, 1 comment by @sam", 1, true))
     assert.is_nil(content:find("@dur: First thread", 1, true))
 
-    local next_thread = get_normal_keymap(vim.api.nvim_get_current_buf(), "]t")
-    local prev_thread = get_normal_keymap(vim.api.nvim_get_current_buf(), "[t")
+    local next_thread = buffer.normal_keymap(vim.api.nvim_get_current_buf(), "]t")
+    local prev_thread = buffer.normal_keymap(vim.api.nvim_get_current_buf(), "[t")
     assert.is_not_nil(next_thread)
     assert.is_not_nil(prev_thread)
 
     vim.api.nvim_win_set_cursor(0, { 1, 0 })
     next_thread.callback()
-    assert.is_truthy(current_line():find("@dur: First thread", 1, true))
+    assert.is_truthy(buffer.current_line():find("@dur: First thread", 1, true))
 
     next_thread.callback()
-    assert.is_truthy(current_line():find("@sam: Second thread", 1, true))
+    assert.is_truthy(buffer.current_line():find("@sam: Second thread", 1, true))
 
     prev_thread.callback()
-    assert.is_truthy(current_line():find("@dur: First thread", 1, true))
+    assert.is_truthy(buffer.current_line():find("@dur: First thread", 1, true))
   end)
 
   it("posts PR actions with gh in the default backend", function()
@@ -816,9 +736,9 @@ describe("zdiff.review", function()
     local ok, err = pcall(function()
       review.open()
       wait_for_loaded()
-      local action = assert(get_normal_keymap(vim.api.nvim_get_current_buf(), "a"))
+      local action = assert(buffer.normal_keymap(vim.api.nvim_get_current_buf(), "a"))
       for _ = 1, 3 do
-        vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
+        vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("#12")), 0 })
         action.callback()
         assert.is_true(vim.wait(1000, function()
           local debug = review._debug_state()
@@ -835,9 +755,9 @@ describe("zdiff.review", function()
     local request_changes = nil
     local comment = nil
     for _, call in ipairs(calls) do
-      if call[3] == "review" and contains_arg(call, "--approve") then
+      if call[3] == "review" and vim.tbl_contains(call, "--approve") then
         approve = call
-      elseif call[3] == "review" and contains_arg(call, "--request-changes") then
+      elseif call[3] == "review" and vim.tbl_contains(call, "--request-changes") then
         request_changes = call
       elseif call[3] == "comment" then
         comment = call
@@ -845,11 +765,11 @@ describe("zdiff.review", function()
     end
 
     assert.is_not_nil(approve)
-    assert.is_true(contains_arg(approve, "Looks good"))
+    assert.is_true(vim.tbl_contains(approve, "Looks good"))
     assert.is_not_nil(request_changes)
-    assert.is_true(contains_arg(request_changes, "Please fix this"))
+    assert.is_true(vim.tbl_contains(request_changes, "Please fix this"))
     assert.is_not_nil(comment)
-    assert.is_true(contains_arg(comment, "FYI"))
+    assert.is_true(vim.tbl_contains(comment, "FYI"))
   end)
 
   it("posts comments and replies with gh api in the default backend", function()
@@ -884,7 +804,7 @@ describe("zdiff.review", function()
           stderr = "",
         })
       elseif argv[1] == "gh" and argv[2] == "api" then
-        if contains_arg(argv, "repos/{owner}/{repo}/pulls/12/files") then
+        if vim.tbl_contains(argv, "repos/{owner}/{repo}/pulls/12/files") then
           callback({
             code = 0,
             stdout = vim.json.encode({
@@ -911,9 +831,9 @@ describe("zdiff.review", function()
             }),
             stderr = "",
           })
-        elseif contains_arg(argv, "repos/{owner}/{repo}/contents/a.txt") then
+        elseif vim.tbl_contains(argv, "repos/{owner}/{repo}/contents/a.txt") then
           callback({ code = 0, stdout = "same\nnew\n", stderr = "" })
-        elseif contains_arg(argv, "--method") then
+        elseif vim.tbl_contains(argv, "--method") then
           callback({ code = 0, stdout = "", stderr = "" })
         else
           callback({
@@ -939,8 +859,8 @@ describe("zdiff.review", function()
 
     review.open()
     wait_for_loaded()
-    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
-    get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+    vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("#12")), 0 })
+    buffer.normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
     assert.is_true(vim.wait(1000, function()
       return review._debug_state().comment_count == 1
     end, 20))
@@ -962,15 +882,15 @@ describe("zdiff.review", function()
     end
 
     local ok, err = pcall(function()
-      vim.api.nvim_win_set_cursor(0, { assert(find_line("new")), 0 })
-      get_normal_keymap(vim.api.nvim_get_current_buf(), "c").callback()
+      vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("new")), 0 })
+      buffer.normal_keymap(vim.api.nvim_get_current_buf(), "c").callback()
       assert.is_true(vim.wait(1000, function()
         for _, call in ipairs(calls) do
           if
             call[1] == "gh"
             and call[2] == "api"
-            and contains_arg(call, "--method")
-            and contains_arg(call, "repos/{owner}/{repo}/pulls/12/comments")
+            and vim.tbl_contains(call, "--method")
+            and vim.tbl_contains(call, "repos/{owner}/{repo}/pulls/12/comments")
           then
             return true
           end
@@ -978,15 +898,15 @@ describe("zdiff.review", function()
         return false
       end, 20))
 
-      vim.api.nvim_win_set_cursor(0, { assert(find_line("@dur: Existing comment")), 0 })
-      get_normal_keymap(vim.api.nvim_get_current_buf(), "r").callback()
+      vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("@dur: Existing comment")), 0 })
+      buffer.normal_keymap(vim.api.nvim_get_current_buf(), "r").callback()
       assert.is_true(vim.wait(1000, function()
         for _, call in ipairs(calls) do
           if
             call[1] == "gh"
             and call[2] == "api"
-            and contains_arg(call, "--method")
-            and contains_arg(call, "repos/{owner}/{repo}/pulls/12/comments/44/replies")
+            and vim.tbl_contains(call, "--method")
+            and vim.tbl_contains(call, "repos/{owner}/{repo}/pulls/12/comments/44/replies")
           then
             return true
           end
@@ -1002,11 +922,11 @@ describe("zdiff.review", function()
     local api_call = nil
     local reply_call = nil
     for _, call in ipairs(calls) do
-      if call[1] == "gh" and call[2] == "api" and contains_arg(call, "--method") then
-        if contains_arg(call, "repos/{owner}/{repo}/pulls/12/comments") then
+      if call[1] == "gh" and call[2] == "api" and vim.tbl_contains(call, "--method") then
+        if vim.tbl_contains(call, "repos/{owner}/{repo}/pulls/12/comments") then
           api_call = call
         elseif
-          contains_arg(call, "repos/{owner}/{repo}/pulls/12/comments/44/replies")
+          vim.tbl_contains(call, "repos/{owner}/{repo}/pulls/12/comments/44/replies")
         then
           reply_call = call
         end
@@ -1014,13 +934,13 @@ describe("zdiff.review", function()
     end
 
     assert.is_not_nil(api_call)
-    assert.is_true(contains_arg(api_call, "repos/{owner}/{repo}/pulls/12/comments"))
-    assert.is_true(contains_arg(api_call, "body=Needs follow-up"))
-    assert.is_true(contains_arg(api_call, "commit_id=head123"))
-    assert.is_true(contains_arg(api_call, "path=a.txt"))
-    assert.is_true(contains_arg(api_call, "side=RIGHT"))
-    assert.is_true(contains_arg(api_call, "line=2"))
+    assert.is_true(vim.tbl_contains(api_call, "repos/{owner}/{repo}/pulls/12/comments"))
+    assert.is_true(vim.tbl_contains(api_call, "body=Needs follow-up"))
+    assert.is_true(vim.tbl_contains(api_call, "commit_id=head123"))
+    assert.is_true(vim.tbl_contains(api_call, "path=a.txt"))
+    assert.is_true(vim.tbl_contains(api_call, "side=RIGHT"))
+    assert.is_true(vim.tbl_contains(api_call, "line=2"))
     assert.is_not_nil(reply_call)
-    assert.is_true(contains_arg(reply_call, "body=Reply body"))
+    assert.is_true(vim.tbl_contains(reply_call, "body=Reply body"))
   end)
 end)

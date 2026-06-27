@@ -1,83 +1,16 @@
 local M = {}
 local uv = vim.uv or vim.loop
-
-local function run_sync(cmd, cwd)
-  local full_cmd = cmd
-  if cwd and cwd ~= "" then
-    full_cmd = "cd " .. vim.fn.shellescape(cwd) .. " && " .. cmd
-  end
-  local out = vim.fn.system(full_cmd)
-  if vim.v.shell_error ~= 0 then
-    error(string.format("command failed (%s): %s", full_cmd, out))
-  end
-  return out
-end
-
-local function write_file(path, lines)
-  local f = assert(io.open(path, "w"))
-  f:write(table.concat(lines, "\n"))
-  f:write("\n")
-  f:close()
-end
-
-local function find_keymap_callback(buf, lhs)
-  local keymaps = vim.api.nvim_buf_get_keymap(buf, "n")
-  for _, km in ipairs(keymaps) do
-    if km.lhs == lhs then
-      return km.callback
-    end
-  end
-  return nil
-end
-
-local function wait_for_loaded(timeout_ms)
-  local ok = vim.wait(timeout_ms, function()
-    local buf = vim.api.nvim_get_current_buf()
-    if not vim.api.nvim_buf_is_valid(buf) or vim.bo[buf].filetype ~= "zdiff" then
-      return false
-    end
-    local lines = vim.api.nvim_buf_get_lines(buf, 0, 5, false)
-    if #lines == 0 then
-      return false
-    end
-    local header = lines[1] or ""
-    local loading = header:find("%(loading%.%.%.%)", 1, false) ~= nil
-    return not loading
-  end, 50)
-  if not ok then
-    error("timeout waiting for zdiff async refresh to complete")
-  end
-end
-
-local function close_zdiff_or_error()
-  local buf = vim.api.nvim_get_current_buf()
-  local close_cb = find_keymap_callback(buf, "q")
-  if not close_cb then
-    error("could not find close keymap callback in zdiff buffer")
-  end
-  close_cb()
-end
-
-local function wait_for_syntax_idle(timeout_ms)
-  local zdiff = require("zdiff")
-  local ok = vim.wait(timeout_ms, function()
-    local dbg = zdiff._debug_state and zdiff._debug_state() or {}
-    return not dbg.pending_render
-      and (dbg.pending_hunk_jobs or 0) == 0
-      and (dbg.pending_syntax_jobs or 0) == 0
-  end, 50)
-  if not ok then
-    error("timeout waiting for zdiff syntax jobs to complete")
-  end
-end
+local buffer = require("tests.helpers.buffer")
+local git_repo = require("tests.helpers.git_repo")
+local session = require("tests.helpers.zdiff_session")
 
 local function benchmark_open_ms(open_fn, wait_timeout_ms)
   local start = uv.hrtime()
   open_fn()
-  wait_for_loaded(wait_timeout_ms)
-  wait_for_syntax_idle(wait_timeout_ms)
+  session.wait_for_loaded(wait_timeout_ms)
+  session.wait_for_syntax_idle(wait_timeout_ms)
   local elapsed_ms = (uv.hrtime() - start) / 1e6
-  close_zdiff_or_error()
+  session.close_or_error()
   return elapsed_ms
 end
 
@@ -132,19 +65,14 @@ local function build_load_repo(repo)
     for i = 1, 1500 do
       lines[#lines + 1] = string.format(scenario.template, i, i)
     end
-    write_file(string.format("%s/huge.%s", dir, scenario.ext), lines)
+    git_repo.write_lines(string.format("%s/huge.%s", dir, scenario.ext), lines)
   end
 end
 
 function M.run()
   local zdiff = require("zdiff")
   local plugin_root = vim.fn.getcwd()
-  local repo = vim.fn.tempname()
-  vim.fn.mkdir(repo, "p")
-
-  run_sync("git init", repo)
-  run_sync("git config user.name 'zdiff-test'", repo)
-  run_sync("git config user.email 'zdiff@example.com'", repo)
+  local repo = git_repo.create()
 
   local file_count = 60
   local lines_per_file = 120
@@ -156,17 +84,17 @@ function M.run()
     for j = 1, lines_per_file do
       lines[#lines + 1] = string.format("line %03d in file %03d", j, i)
     end
-    write_file(string.format("%s/file_%03d.txt", dir, i), lines)
+    git_repo.write_lines(string.format("%s/file_%03d.txt", dir, i), lines)
   end
 
-  run_sync("git add . && git commit -m 'baseline'", repo)
+  git_repo.commit_all(repo, "baseline")
 
   -- Create a second commit so HEAD~1 is always valid.
-  write_file(
+  git_repo.write_lines(
     string.format("%s/src/mod_00/file_001.txt", repo),
     { "second commit line", "keep" }
   )
-  run_sync("git add . && git commit -m 'second commit'", repo)
+  git_repo.commit_all(repo, "second commit")
 
   -- Create a heavy working tree diff.
   for i = 1, file_count do
@@ -178,11 +106,11 @@ function M.run()
     end
     f:close()
   end
-  write_file(string.format("%s/new_untracked.txt", repo), { "untracked", "content" })
+  git_repo.write_lines(string.format("%s/new_untracked.txt", repo), { "untracked", "content" })
 
   -- Build language-varied load benchmark files.
   build_load_repo(repo)
-  run_sync("git add . && git commit -m 'add load benchmark files'", repo)
+  git_repo.commit_all(repo, "add load benchmark files")
   -- Modify benchmark files to create large hunks.
   local bench_files = {
     string.format("%s/bench/lua/huge.lua", repo),
@@ -219,17 +147,17 @@ function M.run()
       zdiff.open()
     end
 
-    wait_for_loaded(10000)
-    wait_for_syntax_idle(10000)
+    session.wait_for_loaded(10000)
+    session.wait_for_syntax_idle(10000)
 
     local buf = vim.api.nvim_get_current_buf()
-    local refresh_cb = find_keymap_callback(buf, "R")
+    local refresh_cb = buffer.normal_keymap_callback(buf, "R")
     if refresh_cb then
       refresh_cb()
-      wait_for_loaded(10000)
+      session.wait_for_loaded(10000)
     end
 
-    close_zdiff_or_error()
+    session.close_or_error()
     collectgarbage("collect")
 
     if i == warmup_iterations then

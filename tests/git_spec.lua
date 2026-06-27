@@ -1,61 +1,9 @@
 local git = require("zdiff.git")
-
-local function run_git(repo, args)
-  local argv = { "git", "-C", repo }
-  vim.list_extend(argv, args)
-  local out = vim.fn.system(argv)
-  if vim.v.shell_error ~= 0 then
-    error("git command failed: " .. table.concat(argv, " ") .. "\n" .. out)
-  end
-  return out
-end
-
-local function write_file(path, text)
-  local f = assert(io.open(path, "w"))
-  f:write(text)
-  f:close()
-end
-
-local function create_repo()
-  local repo = vim.fn.tempname()
-  vim.fn.mkdir(repo, "p")
-  run_git(repo, { "init" })
-  run_git(repo, { "config", "user.name", "zdiff-test" })
-  run_git(repo, { "config", "user.email", "zdiff@example.com" })
-  return repo
-end
-
-local function commit_all(repo, message)
-  run_git(repo, { "add", "--", "." })
-  run_git(repo, { "commit", "-m", message })
-end
-
-local function diff_files(repo)
-  local result = nil
-  git.diff_files_async(repo, nil, function(res)
-    result = res
-  end)
-
-  local ok = vim.wait(5000, function()
-    return result ~= nil
-  end, 50)
-  assert.is_true(ok, "timed out waiting for git diff files")
-  assert.is_true(result.ok, result.error)
-  return result.data
-end
-
-local function find_file(files, path)
-  for _, file in ipairs(files) do
-    if file.path == path then
-      return file
-    end
-  end
-  return nil
-end
+local git_repo = require("tests.helpers.git_repo")
 
 describe("git adapter", function()
   it("returns git stderr for failed line commands", function()
-    local repo = create_repo()
+    local repo = git_repo.create()
     local result = git.run_lines(repo, { "rev-parse", "--verify", "missing-ref" })
 
     assert.is_false(result.ok)
@@ -63,7 +11,7 @@ describe("git adapter", function()
   end)
 
   it("reports invalid refs", function()
-    local repo = create_repo()
+    local repo = git_repo.create()
     local result = git.ref_exists(repo, "missing-ref")
 
     assert.is_false(result.ok)
@@ -71,11 +19,11 @@ describe("git adapter", function()
   end)
 
   it("lists staged files before the first commit", function()
-    local repo = create_repo()
-    write_file(repo .. "/new.txt", "one\n")
-    run_git(repo, { "add", "--", "new.txt" })
+    local repo = git_repo.create()
+    git_repo.write_file(repo .. "/new.txt", "one\n")
+    git_repo.run(repo, { "add", "--", "new.txt" })
 
-    local file = find_file(diff_files(repo), "new.txt")
+    local file = git_repo.find_file(git_repo.changed_files(repo), "new.txt")
     assert.is_not_nil(file)
     assert.equals("A", file.status)
     assert.equals(1, file.insertions)
@@ -83,13 +31,13 @@ describe("git adapter", function()
   end)
 
   it("lists staged-only changes after a commit", function()
-    local repo = create_repo()
-    write_file(repo .. "/tracked.txt", "one\n")
-    commit_all(repo, "baseline")
-    write_file(repo .. "/tracked.txt", "two\n")
-    run_git(repo, { "add", "--", "tracked.txt" })
+    local repo = git_repo.create()
+    git_repo.write_file(repo .. "/tracked.txt", "one\n")
+    git_repo.commit_all(repo, "baseline")
+    git_repo.write_file(repo .. "/tracked.txt", "two\n")
+    git_repo.run(repo, { "add", "--", "tracked.txt" })
 
-    local file = find_file(diff_files(repo), "tracked.txt")
+    local file = git_repo.find_file(git_repo.changed_files(repo), "tracked.txt")
     assert.is_not_nil(file)
     assert.equals("M", file.status)
     assert.equals(1, file.insertions)
@@ -97,13 +45,13 @@ describe("git adapter", function()
   end)
 
   it("parses NUL-delimited paths without Git quote escaping", function()
-    local repo = create_repo()
+    local repo = git_repo.create()
     local path = "tabs\tand\ncafé.txt"
-    write_file(repo .. "/" .. path, "one\n")
-    commit_all(repo, "baseline")
-    write_file(repo .. "/" .. path, "two\n")
+    git_repo.write_file(repo .. "/" .. path, "one\n")
+    git_repo.commit_all(repo, "baseline")
+    git_repo.write_file(repo .. "/" .. path, "two\n")
 
-    local file = find_file(diff_files(repo), path)
+    local file = git_repo.find_file(git_repo.changed_files(repo), path)
     assert.is_not_nil(file)
     assert.equals("M", file.status)
     assert.equals(path, file.path)
@@ -115,12 +63,12 @@ describe("git adapter", function()
   end)
 
   it("keeps old paths for deleted files", function()
-    local repo = create_repo()
-    write_file(repo .. "/deleted.txt", "gone\n")
-    commit_all(repo, "baseline")
-    run_git(repo, { "rm", "--", "deleted.txt" })
+    local repo = git_repo.create()
+    git_repo.write_file(repo .. "/deleted.txt", "gone\n")
+    git_repo.commit_all(repo, "baseline")
+    git_repo.run(repo, { "rm", "--", "deleted.txt" })
 
-    local file = find_file(diff_files(repo), "deleted.txt")
+    local file = git_repo.find_file(git_repo.changed_files(repo), "deleted.txt")
     assert.is_not_nil(file)
     assert.equals("D", file.status)
     assert.equals("deleted.txt", file.path)
@@ -131,12 +79,12 @@ describe("git adapter", function()
   end)
 
   it("keeps old and new paths for pure renames", function()
-    local repo = create_repo()
-    write_file(repo .. "/old name.txt", "same\n")
-    commit_all(repo, "baseline")
-    run_git(repo, { "mv", "old name.txt", "new name.txt" })
+    local repo = git_repo.create()
+    git_repo.write_file(repo .. "/old name.txt", "same\n")
+    git_repo.commit_all(repo, "baseline")
+    git_repo.run(repo, { "mv", "old name.txt", "new name.txt" })
 
-    local file = find_file(diff_files(repo), "new name.txt")
+    local file = git_repo.find_file(git_repo.changed_files(repo), "new name.txt")
     assert.is_not_nil(file)
     assert.equals("R", file.status)
     assert.equals("new name.txt", file.path)

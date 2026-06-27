@@ -1,24 +1,6 @@
 local M = {}
-
-local function run_sync(cmd, cwd)
-  local full_cmd = cmd
-  if cwd and cwd ~= "" then
-    full_cmd = "cd " .. vim.fn.shellescape(cwd) .. " && " .. cmd
-  end
-  local out = vim.fn.system(full_cmd)
-  if vim.v.shell_error ~= 0 then
-    error(string.format("command failed (%s): %s", full_cmd, out))
-  end
-  return out
-end
-
-local function write_file(path, lines)
-  vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
-  local f = assert(io.open(path, "w"))
-  f:write(table.concat(lines, "\n"))
-  f:write("\n")
-  f:close()
-end
+local git_repo = require("tests.helpers.git_repo")
+local session = require("tests.helpers.zdiff_session")
 
 M.files = {
   {
@@ -603,25 +585,19 @@ M.files = {
 }
 
 function M.create_repo()
-  local repo = vim.fn.tempname()
-  vim.fn.mkdir(repo, "p")
-
-  run_sync("git init", repo)
-  run_sync("git config user.name 'zdiff-test'", repo)
-  run_sync("git config user.email 'zdiff@example.com'", repo)
+  local repo = git_repo.create()
 
   for _, file in ipairs(M.files) do
-    write_file(repo .. "/" .. file.path, file.before)
+    git_repo.write_lines(repo .. "/" .. file.path, file.before)
   end
 
-  run_sync("git add .", repo)
-  run_sync("git commit -m 'baseline syntax fixtures'", repo)
+  git_repo.commit_all(repo, "baseline syntax fixtures")
 
   for _, file in ipairs(M.files) do
-    write_file(repo .. "/" .. file.path, file.after)
+    git_repo.write_lines(repo .. "/" .. file.path, file.after)
   end
 
-  write_file(repo .. "/untracked/example.sh", {
+  git_repo.write_lines(repo .. "/untracked/example.sh", {
     "#!/usr/bin/env bash",
     "set -euo pipefail",
     'echo "hello from an untracked shell file"',
@@ -660,31 +636,11 @@ function M.lang_available(path)
 end
 
 function M.wait_for_loaded(timeout_ms)
-  local ok = vim.wait(timeout_ms, function()
-    local buf = vim.api.nvim_get_current_buf()
-    if not vim.api.nvim_buf_is_valid(buf) or vim.bo[buf].filetype ~= "zdiff" then
-      return false
-    end
-    local lines = vim.api.nvim_buf_get_lines(buf, 0, 2, false)
-    local header = lines[1] or ""
-    return header ~= "" and header:find("%(loading%.%.%.%)", 1, false) == nil
-  end, 50)
-  if not ok then
-    error("timeout waiting for zdiff async refresh to complete")
-  end
+  session.wait_for_loaded(timeout_ms)
 end
 
 function M.wait_for_syntax_idle(timeout_ms)
-  local zdiff = require("zdiff")
-  local ok = vim.wait(timeout_ms, function()
-    local dbg = zdiff._debug_state and zdiff._debug_state() or {}
-    return not dbg.pending_render
-      and (dbg.pending_hunk_jobs or 0) == 0
-      and (dbg.pending_syntax_jobs or 0) == 0
-  end, 50)
-  if not ok then
-    error("timeout waiting for zdiff syntax jobs to complete")
-  end
+  session.wait_for_syntax_idle(timeout_ms)
 end
 
 return M

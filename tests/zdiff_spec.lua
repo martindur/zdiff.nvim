@@ -1,72 +1,8 @@
 local zdiff = require("zdiff")
 local git = require("zdiff.git")
-
-local function run_git(repo, args)
-  local argv = { "git", "-C", repo }
-  vim.list_extend(argv, args)
-  local out = vim.fn.system(argv)
-  if vim.v.shell_error ~= 0 then
-    error("git command failed: " .. table.concat(argv, " ") .. "\n" .. out)
-  end
-  return out
-end
-
-local function write_file(path, text)
-  local f = assert(io.open(path, "w"))
-  f:write(text)
-  f:close()
-end
-
-local function create_changed_repo(filename, baseline, changed)
-  local repo = vim.fn.tempname()
-  vim.fn.mkdir(repo, "p")
-  run_git(repo, { "init" })
-  run_git(repo, { "config", "user.name", "zdiff-test" })
-  run_git(repo, { "config", "user.email", "zdiff@example.com" })
-  write_file(repo .. "/" .. filename, baseline)
-  run_git(repo, { "add", "--", "." })
-  run_git(repo, { "commit", "-m", "baseline" })
-  write_file(repo .. "/" .. filename, changed)
-  return repo
-end
-
-local function wait_for_loaded()
-  local ok = vim.wait(5000, function()
-    local dbg = zdiff._debug_state()
-    return not dbg.loading_files
-      and not dbg.pending_render
-      and (dbg.pending_hunk_jobs or 0) == 0
-  end, 50)
-  assert.is_true(ok, "timed out waiting for zdiff to load")
-end
-
-local function get_normal_keymap(buf, lhs)
-  for _, km in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
-    if km.lhs == lhs then
-      return km
-    end
-  end
-  return nil
-end
-
-local function get_visual_keymap(buf, lhs)
-  for _, km in ipairs(vim.api.nvim_buf_get_keymap(buf, "v")) do
-    if km.lhs == lhs then
-      return km
-    end
-  end
-  return nil
-end
-
-local function find_line(text)
-  local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
-  for i, line in ipairs(lines) do
-    if line:find(text, 1, true) then
-      return i
-    end
-  end
-  return nil
-end
+local buffer = require("tests.helpers.buffer")
+local git_repo = require("tests.helpers.git_repo")
+local session = require("tests.helpers.zdiff_session")
 
 describe("zdiff", function()
   local plugin_root
@@ -263,19 +199,19 @@ describe("zdiff", function()
     end)
 
     it("should not reuse a zdiff session across repository roots", function()
-      local repo_a = create_changed_repo("a.txt", "a old\n", "a new\n")
-      local repo_b = create_changed_repo("b.txt", "b old\n", "b new\n")
+      local repo_a = git_repo.create_changed_file("a.txt", "a old\n", "a new\n")
+      local repo_b = git_repo.create_changed_file("b.txt", "b old\n", "b new\n")
 
       vim.cmd("cd " .. vim.fn.fnameescape(repo_a))
       zdiff.open()
-      wait_for_loaded()
+      session.wait_for_loaded()
       local first_content =
         table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
       assert.is_truthy(first_content:find("a.txt", 1, true))
 
       vim.cmd("cd " .. vim.fn.fnameescape(repo_b))
       zdiff.open()
-      wait_for_loaded()
+      session.wait_for_loaded()
       local second_content =
         table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
       assert.is_truthy(second_content:find("b.txt", 1, true))
@@ -283,17 +219,17 @@ describe("zdiff", function()
     end)
 
     it("should show git errors when toggle mode uses an invalid ref", function()
-      local repo = create_changed_repo("a.txt", "old\n", "new\n")
+      local repo = git_repo.create_changed_file("a.txt", "old\n", "new\n")
       zdiff.config.default_branch = "missing-branch"
 
       vim.cmd("cd " .. vim.fn.fnameescape(repo))
       zdiff.open()
-      wait_for_loaded()
+      session.wait_for_loaded()
 
-      local toggle_keymap = get_normal_keymap(vim.api.nvim_get_current_buf(), "m")
+      local toggle_keymap = buffer.normal_keymap(vim.api.nvim_get_current_buf(), "m")
       assert.is_not_nil(toggle_keymap)
       toggle_keymap.callback()
-      wait_for_loaded()
+      session.wait_for_loaded()
 
       local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
       assert.is_truthy(content:find("Error loading changes", 1, true))
@@ -301,8 +237,8 @@ describe("zdiff", function()
     end)
 
     it("should not reload expanded files with no hunks", function()
-      local repo = create_changed_repo("old.txt", "same\n", "same\n")
-      run_git(repo, { "mv", "old.txt", "new.txt" })
+      local repo = git_repo.create_changed_file("old.txt", "same\n", "same\n")
+      git_repo.run(repo, { "mv", "old.txt", "new.txt" })
       zdiff.config.default_expanded = true
 
       local calls = 0
@@ -315,13 +251,13 @@ describe("zdiff", function()
       local ok, err = pcall(function()
         vim.cmd("cd " .. vim.fn.fnameescape(repo))
         zdiff.open()
-        wait_for_loaded()
+        session.wait_for_loaded()
 
-        local toggle_keymap = get_normal_keymap(vim.api.nvim_get_current_buf(), "<Tab>")
-        vim.api.nvim_win_set_cursor(0, { assert(find_line("old.txt -> new.txt")), 0 })
+        local toggle_keymap = buffer.normal_keymap(vim.api.nvim_get_current_buf(), "<Tab>")
+        vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("old.txt -> new.txt")), 0 })
         toggle_keymap.callback()
         toggle_keymap.callback()
-        wait_for_loaded()
+        session.wait_for_loaded()
       end)
       git.file_diff_lines_async = original
 
@@ -330,12 +266,12 @@ describe("zdiff", function()
     end)
 
     it("should ignore non-source diff metadata lines", function()
-      local repo = create_changed_repo("no-newline.txt", "old", "new")
+      local repo = git_repo.create_changed_file("no-newline.txt", "old", "new")
       zdiff.config.default_expanded = true
 
       vim.cmd("cd " .. vim.fn.fnameescape(repo))
       zdiff.open()
-      wait_for_loaded()
+      session.wait_for_loaded()
 
       local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
       assert.is_truthy(content:find("old", 1, true))
@@ -359,14 +295,14 @@ describe("zdiff", function()
       zdiff.open()
       local buf = vim.api.nvim_get_current_buf()
 
-      assert.is_nil(get_normal_keymap(buf, "<CR>"))
-      assert.is_nil(get_normal_keymap(buf, "<Tab>"))
-      assert.is_nil(get_normal_keymap(buf, "q"))
-      assert.is_nil(get_normal_keymap(buf, "R"))
-      assert.is_nil(get_normal_keymap(buf, "m"))
-      assert.is_nil(get_normal_keymap(buf, "?"))
-      assert.is_nil(get_normal_keymap(buf, "gy"))
-      assert.is_nil(get_visual_keymap(buf, "gy"))
+      assert.is_nil(buffer.normal_keymap(buf, "<CR>"))
+      assert.is_nil(buffer.normal_keymap(buf, "<Tab>"))
+      assert.is_nil(buffer.normal_keymap(buf, "q"))
+      assert.is_nil(buffer.normal_keymap(buf, "R"))
+      assert.is_nil(buffer.normal_keymap(buf, "m"))
+      assert.is_nil(buffer.normal_keymap(buf, "?"))
+      assert.is_nil(buffer.normal_keymap(buf, "gy"))
+      assert.is_nil(buffer.visual_keymap(buf, "gy"))
     end)
 
     it("should only show enabled keymaps in help", function()
@@ -396,7 +332,7 @@ describe("zdiff", function()
       end
       local changed = vim.deepcopy(baseline)
       changed[30] = "changed target"
-      local repo = create_changed_repo(
+      local repo = git_repo.create_changed_file(
         "a.txt",
         table.concat(baseline, "\n") .. "\n",
         table.concat(changed, "\n") .. "\n"
@@ -415,12 +351,12 @@ describe("zdiff", function()
       local ok, err = pcall(function()
         vim.cmd("cd " .. vim.fn.fnameescape(repo))
         zdiff.open()
-        wait_for_loaded()
+        session.wait_for_loaded()
 
         local diff_buf = vim.api.nvim_get_current_buf()
-        local target_line = assert(find_line("changed target"))
+        local target_line = assert(buffer.find_line("changed target"))
         vim.api.nvim_win_set_cursor(0, { target_line, 0 })
-        get_normal_keymap(diff_buf, "<CR>").callback()
+        buffer.normal_keymap(diff_buf, "<CR>").callback()
 
         vim.api.nvim_win_set_buf(0, diff_buf)
         assert.is_true(vim.wait(5000, function()
@@ -439,15 +375,15 @@ describe("zdiff", function()
     end)
 
     it("should not open deleted files from the worktree", function()
-      local repo = create_changed_repo("deleted.txt", "gone\n", "gone\n")
-      run_git(repo, { "rm", "--", "deleted.txt" })
+      local repo = git_repo.create_changed_file("deleted.txt", "gone\n", "gone\n")
+      git_repo.run(repo, { "rm", "--", "deleted.txt" })
 
       vim.cmd("cd " .. vim.fn.fnameescape(repo))
       zdiff.open()
-      wait_for_loaded()
+      session.wait_for_loaded()
 
-      local goto_keymap = get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>")
-      vim.api.nvim_win_set_cursor(0, { assert(find_line("deleted.txt")), 0 })
+      local goto_keymap = buffer.normal_keymap(vim.api.nvim_get_current_buf(), "<CR>")
+      vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("deleted.txt")), 0 })
 
       local notifications = {}
       local old_notify = vim.notify
@@ -463,15 +399,15 @@ describe("zdiff", function()
     end)
 
     it("should not navigate deleted lines to the current file", function()
-      local repo = create_changed_repo("a.txt", "one\ntwo\nthree\n", "one\nthree\n")
+      local repo = git_repo.create_changed_file("a.txt", "one\ntwo\nthree\n", "one\nthree\n")
       zdiff.config.default_expanded = true
 
       vim.cmd("cd " .. vim.fn.fnameescape(repo))
       zdiff.open()
-      wait_for_loaded()
+      session.wait_for_loaded()
 
-      local goto_keymap = get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>")
-      vim.api.nvim_win_set_cursor(0, { assert(find_line("two")), 0 })
+      local goto_keymap = buffer.normal_keymap(vim.api.nvim_get_current_buf(), "<CR>")
+      vim.api.nvim_win_set_cursor(0, { assert(buffer.find_line("two")), 0 })
 
       local notifications = {}
       local old_notify = vim.notify

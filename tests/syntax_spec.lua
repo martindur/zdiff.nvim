@@ -1,26 +1,6 @@
 local fixtures = require("tests.helpers.syntax_fixtures")
 local zdiff = require("zdiff")
-
-local function syntax_marks_for_line(buf, ns, row)
-  local marks = vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })
-  local found = {}
-  for _, mark in ipairs(marks) do
-    if mark[2] == row then
-      table.insert(found, mark)
-    end
-  end
-  return found
-end
-
-local function marks_have_group(marks, group)
-  for _, mark in ipairs(marks) do
-    local details = mark[4] or {}
-    if details.hl_group == group then
-      return true
-    end
-  end
-  return false
-end
+local syntax_marks = require("tests.helpers.syntax_marks")
 
 local function is_file_header(line, fixtures_files)
   for _, file in ipairs(fixtures_files) do
@@ -57,15 +37,6 @@ local function line_with_probe(buf, path, probe)
   end
 
   return nil, nil
-end
-
-local function list_contains(values, needle)
-  for _, value in ipairs(values) do
-    if value == needle then
-      return true
-    end
-  end
-  return false
 end
 
 describe("syntax highlighting", function()
@@ -120,17 +91,17 @@ describe("syntax highlighting", function()
         local row, line = line_with_probe(buf, file.path, file.probe)
         assert.is_not_nil(row, "expected rendered probe for " .. file.path)
 
-        local marks = syntax_marks_for_line(buf, ns, row)
+        local marks = syntax_marks.for_line(buf, ns, row)
         assert.is_true(
           #marks > 0,
           string.format("expected syntax extmarks on %s probe line %q", file.path, line)
         )
         assert.is_true(
-          list_contains(projected_files, file.path),
+          vim.tbl_contains(projected_files, file.path),
           "expected projection syntax for " .. file.path
         )
         assert.is_false(
-          list_contains(fallback_files, file.path),
+          vim.tbl_contains(fallback_files, file.path),
           "expected no hunk fallback after projection settled for " .. file.path
         )
         checked = checked + 1
@@ -151,9 +122,9 @@ describe("syntax highlighting", function()
       local row, line = line_with_probe(buf, "docs/example.md", "require('zdiff')")
       assert.is_not_nil(row, "expected rendered markdown lua fence line")
 
-      local marks = syntax_marks_for_line(buf, ns, row)
+      local marks = syntax_marks.for_line(buf, ns, row)
       assert.is_true(
-        marks_have_group(marks, "@function.call"),
+        syntax_marks.has_group(marks, "@function.call"),
         string.format("expected injected lua captures on markdown fence line %q", line)
       )
     end
