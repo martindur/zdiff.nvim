@@ -304,13 +304,13 @@ local function render_loaded_hunks(ctx, file_idx, file)
   end
 end
 
----@param opts {lines: string[], highlights: table[], files: table[], icons: table, syntax: table|nil, syntax_projection_cache: table|nil, syntax_cache_prefix: string|nil, queue_hunks: fun(file_idx: number, file: table)|nil, map_diff_line: fun(mapping: table, file: table, diff_line: table)|nil, extra_file_rows: fun(ctx: table): table[]|nil, extra_rows: fun(ctx: table): table[]|nil}
+---@param opts {lines: string[], highlights: table[], syntax_highlights: table[]|nil, files: table[], icons: table, syntax: table|nil, syntax_projection_cache: table|nil, syntax_cache_prefix: string|nil, queue_hunks: fun(file_idx: number, file: table)|nil, map_diff_line: fun(mapping: table, file: table, diff_line: table)|nil, extra_file_rows: fun(ctx: table): table[]|nil, extra_rows: fun(ctx: table): table[]|nil}
 ---@return table
 function M.render(opts)
   local ctx = {
     lines = opts.lines,
     highlights = opts.highlights,
-    syntax_highlights = {},
+    syntax_highlights = opts.syntax_highlights or {},
     syntax_requests = {},
     markers = {},
     line_map = {},

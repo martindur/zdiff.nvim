@@ -125,6 +125,8 @@ Press `?` while in zdiff to see all available keymaps.
 `zdiff.review` provides an API-backed GitHub PR browser without checking out
 branches or creating worktrees. It requires the
 [GitHub CLI](https://cli.github.com/) to be installed and authenticated.
+PR diff views show the PR description above the files with markdown syntax
+highlighting when available.
 
 For lazy.nvim, include `ZdiffReview` in `cmd` and call its separate setup:
 
@@ -159,6 +161,7 @@ PR diff keymaps:
 | Key | Action |
 |-----|--------|
 | `<Tab>` | Toggle the file under the cursor |
+| `d` | Toggle the PR description |
 | `c` | Comment on the diff line under the cursor |
 | `r` | Reply to the top-level comment under the cursor |
 | `]t` / `[t` | Jump to the next or previous thread |

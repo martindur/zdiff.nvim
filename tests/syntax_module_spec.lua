@@ -38,6 +38,7 @@ describe("syntax module", function()
 
     local highlights = syntax.get_highlights({
       "# Example",
+      "Use `inline` code and **strong** text.",
       "",
       "```lua",
       "require('zdiff').setup({ default_expanded = true })",
@@ -56,6 +57,10 @@ describe("syntax module", function()
     }, "markdown")
 
     assert.is_true(has_group(highlights, "@markup.raw.block"))
+    if syntax.get_lang_from_filetype("markdown_inline") then
+      assert.is_true(has_group(highlights, "@markup.raw"))
+      assert.is_true(has_group(highlights, "@markup.strong"))
+    end
     assert.is_true(has_group(highlights, "@function.call"))
     if syntax.get_lang_from_filetype("json") then
       assert.is_true(has_group(highlights, "@boolean"))

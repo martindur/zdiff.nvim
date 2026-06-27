@@ -4,6 +4,7 @@ local diff_view = require("zdiff.diff_view")
 local display = require("zdiff.display")
 local git = require("zdiff.git")
 local process = require("zdiff.process")
+local syntax = require("zdiff.syntax")
 
 ---@class ZdiffReviewPr
 ---@field number number
@@ -15,6 +16,7 @@ local process = require("zdiff.process")
 ---@field is_draft boolean
 ---@field base_ref_oid string|nil
 ---@field head_ref_oid string|nil
+---@field body string|nil
 
 ---@class ZdiffReviewState
 ---@field buf number|nil
@@ -24,6 +26,7 @@ local process = require("zdiff.process")
 ---@field prs ZdiffReviewPr[]
 ---@field files ZdiffFile[]
 ---@field active_pr ZdiffReviewPr|nil
+---@field description_expanded boolean
 ---@field line_map table<number, table|number>
 ---@field comments table<string, ZdiffReviewPostedComment[]>
 ---@field posting table<string, boolean>
@@ -48,6 +51,7 @@ local state = {
   prs = {},
   files = {},
   active_pr = nil,
+  description_expanded = false,
   line_map = {},
   comments = {},
   posting = {},
@@ -69,6 +73,7 @@ local state = {
 }
 
 local render
+local description_preview_lines = 8
 
 local ns_diff = vim.api.nvim_create_namespace("zdiff_review")
 local ns_syntax = vim.api.nvim_create_namespace("zdiff_review_syntax")
@@ -221,6 +226,11 @@ local function normalize_pr(raw)
     author = author.login
   end
 
+  local body = raw.body
+  if body == nil then
+    body = raw.description
+  end
+
   return {
     number = tonumber(raw.number) or 0,
     title = tostring(raw.title or ""),
@@ -231,6 +241,7 @@ local function normalize_pr(raw)
     is_draft = raw.isDraft == true,
     base_ref_oid = type(raw.baseRefOid) == "string" and raw.baseRefOid or nil,
     head_ref_oid = type(raw.headRefOid) == "string" and raw.headRefOid or nil,
+    body = type(body) == "string" and body or nil,
   }
 end
 
@@ -312,6 +323,38 @@ local function diff_github_pr(root, pr, done)
       data = vim.deepcopy(files),
     }
     done({ ok = true, data = files })
+  end)
+end
+
+---@param root string
+---@param number number
+---@param done fun(result: {ok: boolean, data?: {body: string}, error?: string})
+local function read_github_pr(root, number, done)
+  process.run(root, {
+    "gh",
+    "pr",
+    "view",
+    tostring(number),
+    "--json",
+    "body",
+  }, function(result)
+    if not result.ok then
+      done({ ok = false, error = result.error })
+      return
+    end
+
+    local ok, decoded = pcall(vim.json.decode, result.stdout)
+    if not ok or type(decoded) ~= "table" then
+      done({ ok = false, error = "could not parse PR description" })
+      return
+    end
+
+    done({
+      ok = true,
+      data = {
+        body = type(decoded.body) == "string" and decoded.body or "",
+      },
+    })
   end)
 end
 
@@ -492,6 +535,7 @@ end
 local default_backend = {
   list_prs = list_github_prs,
   diff_pr = diff_github_pr,
+  read_pr = read_github_pr,
   list_comments = list_github_comments,
   submit_comment = submit_github_comment,
   reply_comment = submit_github_reply,
@@ -722,6 +766,90 @@ local function count_word(count, word)
   return tostring(count) .. " " .. word .. "s"
 end
 
+---@param pr ZdiffReviewPr|nil
+---@return string
+local function pr_body(pr)
+  if not pr or type(pr.body) ~= "string" then
+    return ""
+  end
+  return vim.trim(pr.body:gsub("\r\n", "\n"):gsub("\r", "\n"))
+end
+
+---@param pr ZdiffReviewPr|nil
+---@return boolean
+local function has_pr_body(pr)
+  return pr_body(pr) ~= ""
+end
+
+---@param markdown_lines string[]
+---@param line_mappings table<number, {buffer_line: number, prefix_len: number}>
+---@param syntax_highlights table[]
+local function add_description_syntax(markdown_lines, line_mappings, syntax_highlights)
+  local lang = syntax.get_lang_from_filetype("markdown")
+  if not lang then
+    return
+  end
+
+  for _, hl in ipairs(syntax.get_highlights(markdown_lines, lang)) do
+    local mapping = line_mappings[hl.line]
+    if mapping then
+      local col_start = mapping.prefix_len + hl.col_start
+      local col_end = hl.col_end == -1 and -1 or (mapping.prefix_len + hl.col_end)
+      table.insert(syntax_highlights, {
+        mapping.buffer_line,
+        hl.hl_group,
+        col_start,
+        col_end,
+      })
+    end
+  end
+end
+
+---@param lines string[]
+---@param highlights table[]
+---@param syntax_highlights table[]
+---@param pr ZdiffReviewPr|nil
+local function render_pr_description(lines, highlights, syntax_highlights, pr)
+  local body = pr_body(pr)
+  if body == "" then
+    return
+  end
+
+  local body_lines = split_lines(body)
+  if #body_lines == 0 then
+    return
+  end
+
+  table.insert(lines, " Description")
+  table.insert(highlights, { #lines, "Title", 0, -1 })
+
+  local limit = state.description_expanded and #body_lines
+    or math.min(#body_lines, description_preview_lines)
+  local line_mappings = {}
+  for idx = 1, limit do
+    table.insert(lines, "  " .. body_lines[idx])
+    line_mappings[idx] = {
+      buffer_line = #lines,
+      prefix_len = 2,
+    }
+    table.insert(highlights, { #lines, "Comment", 0, -1 })
+  end
+  add_description_syntax(body_lines, line_mappings, syntax_highlights)
+
+  local remaining = #body_lines - limit
+  if remaining > 0 then
+    local suffix = remaining == 1 and "line" or "lines"
+    table.insert(
+      lines,
+      string.format("  ... %d more description %s", remaining, suffix)
+    )
+    table.insert(highlights, { #lines, "Comment", 0, -1 })
+  end
+
+  table.insert(lines, string.rep("-", 60))
+  table.insert(highlights, { #lines, "Comment", 0, -1 })
+end
+
 ---@param ctx table
 ---@return table[]
 local function file_summary_rows(ctx)
@@ -888,6 +1016,7 @@ end
 ---@param lines string[]
 ---@param highlights table[]
 local function render_diff(lines, highlights)
+  local syntax_highlights = {}
   local pr = state.active_pr
   local title = " zdiff.review: PR diff"
   if pr then
@@ -907,6 +1036,7 @@ local function render_diff(lines, highlights)
     table.insert(lines, "  Error loading comments: " .. state.comment_error)
     table.insert(highlights, { #lines, "Comment", 0, -1 })
   end
+  render_pr_description(lines, highlights, syntax_highlights, pr)
 
   if #state.files == 0 then
     table.insert(lines, "")
@@ -921,7 +1051,7 @@ local function render_diff(lines, highlights)
     return {
       lines = lines,
       highlights = highlights,
-      syntax_highlights = {},
+      syntax_highlights = syntax_highlights,
       syntax_requests = {},
       markers = {},
       line_map = {},
@@ -932,6 +1062,7 @@ local function render_diff(lines, highlights)
   return diff_view.render({
     lines = lines,
     highlights = highlights,
+    syntax_highlights = syntax_highlights,
     files = state.files,
     icons = icons,
     syntax = syntax_config,
@@ -988,6 +1119,34 @@ render = function()
 end
 
 ---@param pr ZdiffReviewPr
+---@param done fun()
+local function load_pr_details(pr, done)
+  if type(pr.body) == "string" then
+    done()
+    return
+  end
+
+  local read_pr = backend().read_pr
+  if not read_pr or not state.root then
+    done()
+    return
+  end
+
+  read_pr(state.root, pr.number, function(result)
+    if result.ok and type(result.data) == "table" then
+      local body = result.data.body
+      if body == nil then
+        body = result.data.description
+      end
+      if type(body) == "string" then
+        pr.body = body
+      end
+    end
+    done()
+  end)
+end
+
+---@param pr ZdiffReviewPr
 local function load_pr_comments(pr)
   local list_comments = backend().list_comments
   if not list_comments or not state.root then
@@ -1027,8 +1186,12 @@ local function load_pr_diff(pr)
 
   state.refresh_seq = state.refresh_seq + 1
   local refresh_seq = state.refresh_seq
+  local keep_description_expanded = state.active_pr
+    and state.active_pr.number == pr.number
+    and state.description_expanded
   state.view = "diff"
   state.active_pr = pr
+  state.description_expanded = keep_description_expanded == true
   state.files = {}
   state.comments = {}
   state.posting = {}
@@ -1045,26 +1208,34 @@ local function load_pr_diff(pr)
   }
   render()
 
-  backend().diff_pr(state.root, pr, function(result)
+  load_pr_details(pr, function()
     if refresh_seq ~= state.refresh_seq then
       return
     end
 
-    if result.ok then
-      state.files = {}
-      for _, file in ipairs(result.data or {}) do
-        table.insert(state.files, normalize_backend_file(file, pr))
-      end
-      state.load_error = nil
-    else
-      state.files = {}
-      state.load_error = render_error(result.error)
-    end
-    state.loading = false
     render()
-    if result.ok then
-      load_pr_comments(pr)
-    end
+
+    backend().diff_pr(state.root, pr, function(result)
+      if refresh_seq ~= state.refresh_seq then
+        return
+      end
+
+      if result.ok then
+        state.files = {}
+        for _, file in ipairs(result.data or {}) do
+          table.insert(state.files, normalize_backend_file(file, pr))
+        end
+        state.load_error = nil
+      else
+        state.files = {}
+        state.load_error = render_error(result.error)
+      end
+      state.loading = false
+      render()
+      if result.ok then
+        load_pr_comments(pr)
+      end
+    end)
   end)
 end
 
@@ -1080,6 +1251,7 @@ local function refresh_list()
   local refresh_seq = state.refresh_seq
   state.view = "list"
   state.active_pr = nil
+  state.description_expanded = false
   state.files = {}
   state.comments = {}
   state.posting = {}
@@ -1230,6 +1402,15 @@ local function prompt_pr_action()
       post_pr_action(pr, action, input)
     end)
   end)
+end
+
+local function toggle_description()
+  if state.view ~= "diff" or not has_pr_body(state.active_pr) then
+    return
+  end
+
+  state.description_expanded = not state.description_expanded
+  render()
 end
 
 local function toggle_file()
@@ -1537,6 +1718,7 @@ local function close()
   state.prs = {}
   state.files = {}
   state.active_pr = nil
+  state.description_expanded = false
   state.line_map = {}
   state.comments = {}
   state.posting = {}
@@ -1558,6 +1740,7 @@ local function back_or_close()
   state.refresh_seq = state.refresh_seq + 1
   state.view = "list"
   state.active_pr = nil
+  state.description_expanded = false
   state.files = {}
   state.comments = {}
   state.posting = {}
@@ -1585,6 +1768,7 @@ function M.open()
   state.root = root
   state.view = "list"
   state.active_pr = nil
+  state.description_expanded = false
   state.files = {}
   state.comments = {}
   state.posting = {}
@@ -1606,6 +1790,7 @@ function M.open()
   vim.keymap.set("n", "q", back_or_close, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "<CR>", open_selected_pr, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "a", prompt_pr_action, { buffer = state.buf, silent = true })
+  vim.keymap.set("n", "d", toggle_description, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "<Tab>", toggle_file, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "c", prompt_comment, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "r", prompt_reply, { buffer = state.buf, silent = true })
@@ -1650,6 +1835,7 @@ function M._debug_state()
     pr_count = #state.prs,
     file_count = #state.files,
     expanded_count = expanded_count,
+    description_expanded = state.description_expanded,
     comment_count = vim.tbl_count(state.comments),
     posting_count = vim.tbl_count(state.posting),
     pr_action_pending = state.pr_action_pending,

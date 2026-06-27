@@ -35,6 +35,7 @@ end
 function M.get_injections(code, syntax)
   local injections = {}
   local fence = nil
+  local inline_lang = syntax.get_lang_from_filetype("markdown_inline")
 
   for line_idx, line in ipairs(code) do
     if fence then
@@ -61,6 +62,12 @@ function M.get_injections(code, syntax)
           lines = {},
           start_line = line_idx + 1,
         }
+      elseif inline_lang and line ~= "" then
+        table.insert(injections, {
+          lang = inline_lang,
+          lines = { line },
+          line_offset = line_idx - 1,
+        })
       end
     end
   end

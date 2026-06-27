@@ -1,5 +1,6 @@
 local review = require("zdiff.review")
 local diff = require("zdiff.diff")
+local syntax = require("zdiff.syntax")
 
 local function run_git(repo, args)
   local argv = { "git", "-C", repo }
@@ -61,6 +62,30 @@ end
 local function list_contains(values, needle)
   for _, value in ipairs(values) do
     if value == needle then
+      return true
+    end
+  end
+  return false
+end
+
+local function syntax_marks_for_line(buf, ns, row)
+  local marks = vim.api.nvim_buf_get_extmarks(buf, ns, 0, -1, { details = true })
+  local found = {}
+  for _, mark in ipairs(marks) do
+    if mark[2] == row then
+      table.insert(found, mark)
+    end
+  end
+  return found
+end
+
+local function marks_have_group_prefix(marks, prefix)
+  for _, mark in ipairs(marks) do
+    local details = mark[4] or {}
+    if
+      type(details.hl_group) == "string"
+      and details.hl_group:find(prefix, 1, true) == 1
+    then
       return true
     end
   end
@@ -323,6 +348,79 @@ describe("zdiff.review", function()
 
     close_keymap.callback()
     assert.is_false(vim.api.nvim_buf_is_valid(buf))
+  end)
+
+  it("renders and toggles the pull request description", function()
+    review._set_backend(review_backend({
+      diff_pr = function(_, _, done)
+        done({
+          ok = true,
+          data = {
+            review_file("a.txt", {
+              "@@ -1,2 +1,2 @@",
+              " same",
+              "-old",
+              "+new",
+            }),
+          },
+        })
+      end,
+    }, {
+      body = table.concat({
+        "# Summary",
+        "- `Visible 2`",
+        "Visible 3",
+        "Visible 4",
+        "Visible 5",
+        "Visible 6",
+        "Visible 7",
+        "Visible 8",
+        "Hidden 9",
+        "Hidden 10",
+      }, "\n"),
+    }))
+
+    review.open()
+    wait_for_loaded()
+    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
+    get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+    wait_for_loaded()
+
+    local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+    assert.is_truthy(content:find("Description", 1, true))
+    assert.is_truthy(content:find("Summary", 1, true))
+    assert.is_truthy(content:find("Visible 8", 1, true))
+    assert.is_truthy(content:find("... 2 more description lines", 1, true))
+    assert.is_nil(content:find("Hidden 9", 1, true))
+
+    local description_keymap = assert(get_normal_keymap(vim.api.nvim_get_current_buf(), "d"))
+    description_keymap.callback()
+
+    content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+    assert.is_true(review._debug_state().description_expanded)
+    assert.is_truthy(content:find("Hidden 9", 1, true))
+    assert.is_truthy(content:find("Hidden 10", 1, true))
+    assert.is_nil(content:find("... 2 more description lines", 1, true))
+
+    if syntax.get_lang_from_filetype("markdown") then
+      local ns = vim.api.nvim_get_namespaces().zdiff_review_syntax
+      assert.is_not_nil(ns, "zdiff_review_syntax namespace should exist")
+      local marks = syntax_marks_for_line(
+        vim.api.nvim_get_current_buf(),
+        ns,
+        assert(find_line("# Summary")) - 1
+      )
+      assert.is_true(marks_have_group_prefix(marks, "@markup.heading"))
+
+      if syntax.get_lang_from_filetype("markdown_inline") then
+        marks = syntax_marks_for_line(
+          vim.api.nvim_get_current_buf(),
+          ns,
+          assert(find_line("`Visible 2`")) - 1
+        )
+        assert.is_true(marks_have_group_prefix(marks, "@markup.raw"))
+      end
+    end
   end)
 
   it("projects syntax from backend file contents", function()
@@ -779,6 +877,12 @@ describe("zdiff.review", function()
           }),
           stderr = "",
         })
+      elseif argv[1] == "gh" and argv[2] == "pr" and argv[3] == "view" then
+        callback({
+          code = 0,
+          stdout = vim.json.encode({ body = "Default backend description" }),
+          stderr = "",
+        })
       elseif argv[1] == "gh" and argv[2] == "api" then
         if contains_arg(argv, "repos/{owner}/{repo}/pulls/12/files") then
           callback({
@@ -842,6 +946,7 @@ describe("zdiff.review", function()
     end, 20))
     expand_file("b.bin")
     local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+    assert.is_truthy(content:find("Default backend description", 1, true))
     assert.is_truthy(
       content:find("Patch unavailable from GitHub (binary or too large)", 1, true)
     )
