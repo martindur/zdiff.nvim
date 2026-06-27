@@ -272,6 +272,7 @@ local function normalize_pr_file(raw, refs)
     display_path = old_path .. " -> " .. new_path
   end
 
+  local patch = type(raw.patch) == "string" and raw.patch or ""
   return {
     path = new_path or old_path or raw.filename,
     display_path = display_path,
@@ -281,9 +282,10 @@ local function normalize_pr_file(raw, refs)
     insertions = tonumber(raw.additions) or 0,
     deletions = tonumber(raw.deletions) or 0,
     expanded = false,
-    hunks = diff.parse_hunks(split_lines(tostring(raw.patch or ""))),
+    hunks = diff.parse_hunks(split_lines(patch)),
     hunk_status = "loaded",
     hunk_error = nil,
+    patch_unavailable = type(raw.patch) ~= "string",
     review_base_ref = refs.base,
     review_head_ref = refs.head,
   }
@@ -915,6 +917,14 @@ end
 ---@return table[]
 local function file_summary_rows(ctx)
   if ctx.file.expanded then
+    if ctx.file.patch_unavailable then
+      return {
+        {
+          text = "  Patch unavailable from GitHub (binary or too large)",
+          hl_group = "Comment",
+        },
+      }
+    end
     return {}
   end
 
@@ -1037,18 +1047,22 @@ local function comment_rows(ctx)
     local author = comment.author or ""
     local prefix = author ~= "" and ("@" .. author .. ": ") or ""
     local indent = comment.in_reply_to_id and "      " or "    "
-    local row = {
-      text = indent .. prefix .. comment.body,
-      hl_group = "ZdiffReviewThread",
-    }
-    if comment.id and not comment.in_reply_to_id then
-      row.map = {
-        kind = "review_comment",
-        file_idx = ctx.file_idx,
-        comment = comment,
+    for line_idx, body_line in
+      ipairs(vim.split(comment.body:gsub("\r\n", "\n"), "\n", { plain = true }))
+    do
+      local row = {
+        text = indent .. (line_idx == 1 and prefix or "") .. body_line,
+        hl_group = "ZdiffReviewThread",
       }
+      if line_idx == 1 and comment.id and not comment.in_reply_to_id then
+        row.map = {
+          kind = "review_comment",
+          file_idx = ctx.file_idx,
+          comment = comment,
+        }
+      end
+      table.insert(rows, row)
     end
-    table.insert(rows, row)
 
     if
       comment.id

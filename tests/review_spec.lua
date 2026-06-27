@@ -640,7 +640,7 @@ describe("zdiff.review", function()
               path = "a.txt",
               side = "RIGHT",
               line = 2,
-              body = "Already posted",
+              body = "Already posted\nSecond line",
               author = "dur",
             },
             {
@@ -649,7 +649,7 @@ describe("zdiff.review", function()
               path = "a.txt",
               side = "RIGHT",
               line = 2,
-              body = "Existing reply",
+              body = "Existing reply\nReply continuation",
               author = "sam",
             },
           },
@@ -669,7 +669,9 @@ describe("zdiff.review", function()
 
     local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
     assert.is_truthy(content:find("@dur: Already posted", 1, true))
+    assert.is_truthy(content:find("    Second line", 1, true))
     assert.is_truthy(content:find("@sam: Existing reply", 1, true))
+    assert.is_truthy(content:find("      Reply continuation", 1, true))
   end)
 
   it("summarizes collapsed threads and jumps between them", function()
@@ -909,6 +911,12 @@ describe("zdiff.review", function()
                     "+new",
                   }, "\n"),
                 },
+                {
+                  filename = "b.bin",
+                  status = "modified",
+                  additions = 0,
+                  deletions = 0,
+                },
               },
             }),
             stderr = "",
@@ -946,6 +954,11 @@ describe("zdiff.review", function()
     assert.is_true(vim.wait(1000, function()
       return review._debug_state().comment_count == 1
     end, 20))
+    expand_file("b.bin")
+    local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+    assert.is_truthy(
+      content:find("Patch unavailable from GitHub (binary or too large)", 1, true)
+    )
     expand_file("a.txt")
 
     local old_input = vim.ui.input
