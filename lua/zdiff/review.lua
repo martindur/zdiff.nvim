@@ -26,6 +26,7 @@ local git = require("zdiff.git")
 ---@field line_map table<number, table|number>
 ---@field comments table<string, ZdiffReviewPostedComment[]>
 ---@field posting table<string, boolean>
+---@field pr_action_pending number|nil
 ---@field loading boolean
 ---@field comments_loading boolean
 ---@field comment_error string|nil
@@ -49,6 +50,7 @@ local state = {
   line_map = {},
   comments = {},
   posting = {},
+  pr_action_pending = nil,
   loading = false,
   comments_loading = false,
   comment_error = nil,
@@ -592,6 +594,54 @@ local function submit_github_reply(root, number, comment_id, body, done)
 end
 
 ---@param root string
+---@param number number
+---@param action "approve"|"request_changes"
+---@param body string
+---@param done fun(result: {ok: boolean, error?: string})
+local function submit_github_review(root, number, action, body, done)
+  local argv = {
+    "gh",
+    "api",
+    "--method",
+    "POST",
+    "repos/{owner}/{repo}/pulls/" .. tostring(number) .. "/reviews",
+    "-H",
+    "Accept: application/vnd.github+json",
+    "-f",
+    "event=" .. (action == "approve" and "APPROVE" or "REQUEST_CHANGES"),
+  }
+  if body ~= "" then
+    vim.list_extend(argv, { "-f", "body=" .. body })
+  end
+  table.insert(argv, "--silent")
+
+  run_async(root, argv, function(result)
+    done({ ok = result.ok, error = result.error })
+  end)
+end
+
+---@param root string
+---@param number number
+---@param body string
+---@param done fun(result: {ok: boolean, error?: string})
+local function submit_github_pr_comment(root, number, body, done)
+  run_async(root, {
+    "gh",
+    "api",
+    "--method",
+    "POST",
+    "repos/{owner}/{repo}/issues/" .. tostring(number) .. "/comments",
+    "-H",
+    "Accept: application/vnd.github+json",
+    "-f",
+    "body=" .. body,
+    "--silent",
+  }, function(result)
+    done({ ok = result.ok, error = result.error })
+  end)
+end
+
+---@param root string
 ---@param path string
 ---@param ref string
 ---@param done fun(result: {ok: boolean, data?: string[], error?: string})
@@ -634,6 +684,8 @@ local default_backend = {
   list_comments = list_github_comments,
   submit_comment = submit_github_comment,
   reply_comment = submit_github_reply,
+  submit_review = submit_github_review,
+  submit_pr_comment = submit_github_pr_comment,
   read_file = read_github_file,
 }
 
@@ -654,6 +706,9 @@ local function format_pr(pr)
   end
   if pr.review_decision ~= "" then
     table.insert(meta, pr.review_decision:lower())
+  end
+  if state.pr_action_pending == pr.number then
+    table.insert(meta, "submitting...")
   end
 
   local suffix = ""
@@ -1238,21 +1293,120 @@ local function refresh()
   end
 end
 
-local function open_selected_pr()
-  if not state.win or not vim.api.nvim_win_is_valid(state.win) then
-    return
+---@return ZdiffReviewPr|nil
+local function selected_pr()
+  if
+    state.view ~= "list"
+    or not state.win
+    or not vim.api.nvim_win_is_valid(state.win)
+  then
+    return nil
   end
 
   local cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
   local pr_idx = state.line_map[cursor_line]
   if type(pr_idx) ~= "number" then
-    return
+    return nil
   end
 
-  local pr = state.prs[pr_idx]
+  return state.prs[pr_idx]
+end
+
+local function open_selected_pr()
+  local pr = selected_pr()
   if pr then
     load_pr_diff(pr)
   end
+end
+
+---@param pr ZdiffReviewPr
+---@param action "approve"|"request_changes"|"comment"
+---@param body string
+local function post_pr_action(pr, action, body)
+  if state.pr_action_pending then
+    notify("A PR action is already submitting", vim.log.levels.WARN)
+    return
+  end
+  if not state.root then
+    return
+  end
+
+  local submit_review = backend().submit_review
+  local submit_pr_comment = backend().submit_pr_comment
+  if
+    (action == "comment" and not submit_pr_comment)
+    or (action ~= "comment" and not submit_review)
+  then
+    notify("PR actions are not supported", vim.log.levels.WARN)
+    return
+  end
+
+  state.pr_action_pending = pr.number
+  render()
+
+  local function done(result)
+    state.pr_action_pending = nil
+    if not result.ok then
+      notify(render_error(result.error), vim.log.levels.ERROR)
+      render()
+      return
+    end
+
+    if action == "approve" then
+      notify("Approved PR #" .. tostring(pr.number))
+    elseif action == "request_changes" then
+      notify("Requested changes on PR #" .. tostring(pr.number))
+    else
+      notify("Posted comment on PR #" .. tostring(pr.number))
+    end
+
+    if action == "comment" then
+      render()
+    else
+      refresh_list()
+    end
+  end
+
+  if action == "comment" then
+    submit_pr_comment(state.root, pr.number, body, done)
+  else
+    submit_review(state.root, pr.number, action, body, done)
+  end
+end
+
+local function prompt_pr_action()
+  local pr = selected_pr()
+  if not pr then
+    return
+  end
+  if state.pr_action_pending then
+    notify("A PR action is already submitting", vim.log.levels.WARN)
+    return
+  end
+
+  vim.ui.select({
+    "Approve",
+    "Request changes",
+    "General comment",
+  }, { prompt = "PR #" .. tostring(pr.number) .. " action: " }, function(choice)
+    if not choice then
+      return
+    end
+
+    local action = choice == "Approve" and "approve"
+      or choice == "Request changes" and "request_changes"
+      or "comment"
+    local prompt = action == "approve" and "Approval message: "
+      or action == "request_changes" and "Request changes message: "
+      or "Comment: "
+
+    vim.ui.input({ prompt = prompt }, function(input)
+      if input == nil or (action ~= "approve" and input == "") then
+        return
+      end
+      post_pr_action(pr, action, input)
+    end)
+  end)
 end
 
 local function toggle_file()
@@ -1562,6 +1716,7 @@ local function close()
   state.line_map = {}
   state.comments = {}
   state.posting = {}
+  state.pr_action_pending = nil
   state.comments_loading = false
   state.comment_error = nil
   state.loading = false
@@ -1593,6 +1748,7 @@ function M.open()
   state.files = {}
   state.comments = {}
   state.posting = {}
+  state.pr_action_pending = nil
   state.comments_loading = false
   state.comment_error = nil
   state.syntax_jobs = {}
@@ -1609,6 +1765,7 @@ function M.open()
 
   vim.keymap.set("n", "q", close, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "<CR>", open_selected_pr, { buffer = state.buf, silent = true })
+  vim.keymap.set("n", "a", prompt_pr_action, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "<Tab>", toggle_file, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "c", prompt_comment, { buffer = state.buf, silent = true })
   vim.keymap.set("n", "r", prompt_reply, { buffer = state.buf, silent = true })
@@ -1655,6 +1812,7 @@ function M._debug_state()
     expanded_count = expanded_count,
     comment_count = vim.tbl_count(state.comments),
     posting_count = vim.tbl_count(state.posting),
+    pr_action_pending = state.pr_action_pending,
     comments_loading = state.comments_loading,
     pending_syntax_jobs = vim.tbl_count(state.syntax_jobs),
     syntax_cache_entries = vim.tbl_count(state.syntax_projection_cache),

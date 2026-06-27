@@ -134,6 +134,109 @@ describe("zdiff.review", function()
     assert.is_truthy(content:find("+10 -2", 1, true))
   end)
 
+  it("submits PR actions from the list", function()
+    local reviews = {}
+    local comments = {}
+    local finish_approval = nil
+    review._set_backend({
+      list_prs = function(_, done)
+        done({
+          ok = true,
+          data = {
+            {
+              number = 12,
+              title = "Add review browser",
+              author = "dur",
+              additions = 10,
+              deletions = 2,
+              review_decision = "",
+              is_draft = false,
+            },
+          },
+        })
+      end,
+      diff_pr = function(_, _, done)
+        done({ ok = true, data = {} })
+      end,
+      submit_review = function(_, number, action, body, done)
+        table.insert(reviews, { number = number, action = action, body = body })
+        if action == "approve" then
+          finish_approval = done
+        else
+          done({ ok = true })
+        end
+      end,
+      submit_pr_comment = function(_, number, body, done)
+        table.insert(comments, { number = number, body = body })
+        done({ ok = true })
+      end,
+    })
+
+    review.open()
+    wait_for_loaded()
+    vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
+
+    local choices = {
+      "Approve",
+      "Request changes",
+      "General comment",
+      "Request changes",
+    }
+    local inputs = { "Looks good", "Please fix this", "FYI", "" }
+    local select_calls = 0
+    local old_select = vim.ui.select
+    local old_input = vim.ui.input
+    vim.ui.select = function(_, _, on_choice)
+      select_calls = select_calls + 1
+      on_choice(table.remove(choices, 1))
+    end
+    vim.ui.input = function(_, on_confirm)
+      on_confirm(table.remove(inputs, 1))
+    end
+
+    local ok, err = pcall(function()
+      local action = assert(get_normal_keymap(vim.api.nvim_get_current_buf(), "a"))
+      action.callback()
+      assert.equals(12, review._debug_state().pr_action_pending)
+      assert.is_not_nil(find_line("submitting..."))
+
+      action.callback()
+      assert.equals(1, #reviews)
+      assert.equals(1, select_calls)
+
+      finish_approval({ ok = true })
+      action.callback()
+      action.callback()
+      action.callback()
+
+      assert.equals(2, #reviews)
+      assert.same({ number = 12, action = "approve", body = "Looks good" }, reviews[1])
+      assert.same({
+        number = 12,
+        action = "request_changes",
+        body = "Please fix this",
+      }, reviews[2])
+      assert.same({ number = 12, body = "FYI" }, comments[1])
+
+      vim.ui.select = function(_, _, on_choice)
+        on_choice(nil)
+      end
+      action.callback()
+      assert.equals(2, #reviews)
+      assert.equals(1, #comments)
+
+      vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
+      get_normal_keymap(vim.api.nvim_get_current_buf(), "<CR>").callback()
+      wait_for_loaded()
+      action.callback()
+      assert.equals(2, #reviews)
+      assert.equals(1, #comments)
+    end)
+    vim.ui.select = old_select
+    vim.ui.input = old_input
+    assert.is_true(ok, err)
+  end)
+
   it("renders backend errors", function()
     review._set_backend({
       list_prs = function(_, done)
@@ -400,7 +503,7 @@ describe("zdiff.review", function()
     assert.equals(1, calls)
     assert.equals(1, review._debug_state().posting_count)
     local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
-    assert.is_truthy(content:find("| Posting...", 1, true))
+    assert.is_truthy(content:find("Posting...", 1, true))
   end)
 
   it("replies to a top-level comment through the backend", function()
@@ -639,8 +742,8 @@ describe("zdiff.review", function()
     end, 20))
 
     local content = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
-    assert.is_truthy(content:find("| 1 thread, 2 comments by @dur, @sam", 1, true))
-    assert.is_truthy(content:find("| 1 thread, 1 comment by @sam", 1, true))
+    assert.is_truthy(content:find("1 thread, 2 comments by @dur, @sam", 1, true))
+    assert.is_truthy(content:find("1 thread, 1 comment by @sam", 1, true))
     assert.is_nil(content:find("@dur: First thread", 1, true))
 
     local next_thread = get_normal_keymap(vim.api.nvim_get_current_buf(), "]t")
@@ -657,6 +760,85 @@ describe("zdiff.review", function()
 
     prev_thread.callback()
     assert.is_truthy(current_line():find("@dur: First thread", 1, true))
+  end)
+
+  it("posts PR actions with gh api in the default backend", function()
+    local old_system = vim.system
+    local calls = {}
+    vim.system = function(argv, _, callback)
+      table.insert(calls, argv)
+      if argv[1] == "gh" and argv[2] == "pr" and argv[3] == "list" then
+        callback({
+          code = 0,
+          stdout = vim.json.encode({
+            {
+              number = 12,
+              title = "Add review browser",
+              author = { login = "dur" },
+              additions = 1,
+              deletions = 1,
+              reviewDecision = "",
+              isDraft = false,
+            },
+          }),
+          stderr = "",
+        })
+      elseif argv[1] == "gh" and argv[2] == "api" then
+        callback({ code = 0, stdout = "", stderr = "" })
+      else
+        callback({ code = 1, stdout = "", stderr = "unexpected command" })
+      end
+      return {}
+    end
+
+    local old_select = vim.ui.select
+    local old_input = vim.ui.input
+    local choices = { "Approve", "Request changes", "General comment" }
+    local inputs = { "Looks good", "Please fix this", "FYI" }
+    vim.ui.select = function(_, _, on_choice)
+      on_choice(table.remove(choices, 1))
+    end
+    vim.ui.input = function(_, on_confirm)
+      on_confirm(table.remove(inputs, 1))
+    end
+
+    local ok, err = pcall(function()
+      review.open()
+      wait_for_loaded()
+      local action = assert(get_normal_keymap(vim.api.nvim_get_current_buf(), "a"))
+      for _ = 1, 3 do
+        vim.api.nvim_win_set_cursor(0, { assert(find_line("#12")), 0 })
+        action.callback()
+        assert.is_true(vim.wait(1000, function()
+          local debug = review._debug_state()
+          return debug.pr_action_pending == nil and not debug.loading
+        end, 20))
+      end
+    end)
+    vim.ui.select = old_select
+    vim.ui.input = old_input
+    vim.system = old_system
+    assert.is_true(ok, err)
+
+    local approve = nil
+    local request_changes = nil
+    local comment = nil
+    for _, call in ipairs(calls) do
+      if contains_arg(call, "event=APPROVE") then
+        approve = call
+      elseif contains_arg(call, "event=REQUEST_CHANGES") then
+        request_changes = call
+      elseif contains_arg(call, "repos/{owner}/{repo}/issues/12/comments") then
+        comment = call
+      end
+    end
+
+    assert.is_not_nil(approve)
+    assert.is_true(contains_arg(approve, "body=Looks good"))
+    assert.is_not_nil(request_changes)
+    assert.is_true(contains_arg(request_changes, "body=Please fix this"))
+    assert.is_not_nil(comment)
+    assert.is_true(contains_arg(comment, "body=FYI"))
   end)
 
   it("posts comments and replies with gh api in the default backend", function()
