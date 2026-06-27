@@ -39,6 +39,7 @@ local winbar = require("zdiff.winbar")
 ---@field syntax_jobs table<string, integer>
 ---@field syntax_job_seq integer
 ---@field syntax_debug {projected_files: string[], fallback_files: string[], skipped_files: table<string, string>}
+---@field restore_cursor_line number|nil cursor line restored after expanded hunks reload
 
 ---@type ZdiffState
 local state = {
@@ -65,6 +66,7 @@ local state = {
     fallback_files = {},
     skipped_files = {},
   },
+  restore_cursor_line = nil,
 }
 
 -- Forward declarations
@@ -401,6 +403,33 @@ local function queue_projection_cache(key, file, lang)
   })
 end
 
+local function restore_cursor_when_ready()
+  if not state.restore_cursor_line then
+    return
+  end
+  for _, file in ipairs(state.files) do
+    if
+      file.expanded and (file.hunk_status == "unloaded" or file.hunk_status == "loading")
+    then
+      return
+    end
+  end
+  if
+    not state.win
+    or not vim.api.nvim_win_is_valid(state.win)
+    or vim.api.nvim_win_get_buf(state.win) ~= state.buf
+  then
+    return
+  end
+
+  local line_count = vim.api.nvim_buf_line_count(state.buf)
+  vim.api.nvim_win_set_cursor(
+    state.win,
+    { math.min(state.restore_cursor_line, line_count), 0 }
+  )
+  state.restore_cursor_line = nil
+end
+
 ---Render the zdiff buffer
 render = function()
   if not state.buf or not vim.api.nvim_buf_is_valid(state.buf) then
@@ -483,6 +512,7 @@ render = function()
   })
 
   vim.bo[state.buf].modifiable = false
+  restore_cursor_when_ready()
   update_winbar()
 
   -- Queue syntax projection jobs after first paint for responsive rendering.
@@ -771,6 +801,7 @@ local function refresh()
   if state.win and vim.api.nvim_win_is_valid(state.win) then
     cursor_line = vim.api.nvim_win_get_cursor(state.win)[1]
   end
+  state.restore_cursor_line = nil
 
   -- Remember expanded state by path
   local expanded_state = {}
@@ -836,15 +867,8 @@ local function refresh()
 
     state.loading_files = false
     state.load_error = nil
+    state.restore_cursor_line = cursor_line
     render()
-
-    -- Restore cursor position (clamped to valid range)
-    if cursor_line and state.win and vim.api.nvim_win_is_valid(state.win) then
-      local line_count = vim.api.nvim_buf_line_count(state.buf)
-      cursor_line = math.min(cursor_line, line_count)
-      vim.api.nvim_win_set_cursor(state.win, { cursor_line, 0 })
-      update_winbar(state.win)
-    end
   end)
 end
 
@@ -921,6 +945,7 @@ local function close()
   state.hunk_job_seq = state.hunk_job_seq + 1
   state.syntax_jobs = {}
   state.syntax_projection_cache = {}
+  state.restore_cursor_line = nil
 end
 
 ---Create the zdiff buffer and window
