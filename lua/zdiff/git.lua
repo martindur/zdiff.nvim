@@ -382,12 +382,17 @@ local function file_diff_args(root, base_ref, file)
   vim.list_extend(args, diff_target(root, base_ref))
   table.insert(args, "--")
   local seen = {}
-  for _, path in ipairs({ file.old_path, file.new_path, file.path }) do
+  local function append_path(path)
     if path and path ~= "" and not seen[path] then
       table.insert(args, path)
       seen[path] = true
     end
   end
+
+  append_path(file.old_path)
+  append_path(file.new_path)
+  append_path(file.path)
+
   return args
 end
 

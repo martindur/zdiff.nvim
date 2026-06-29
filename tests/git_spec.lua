@@ -30,9 +30,9 @@ local function commit_all(repo, message)
   run_git(repo, { "commit", "-m", message })
 end
 
-local function diff_files(repo)
+local function diff_files(repo, base_ref)
   local result = nil
-  git.diff_files_async(repo, nil, function(res)
+  git.diff_files_async(repo, base_ref, function(res)
     result = res
   end)
 
@@ -42,6 +42,12 @@ local function diff_files(repo)
   assert.is_true(ok, "timed out waiting for git diff files")
   assert.is_true(result.ok, result.error)
   return result.data
+end
+
+local function file_diff_lines(repo, base_ref, file)
+  local result = git.file_diff_lines(repo, base_ref, file)
+  assert.is_true(result.ok, result.error)
+  return table.concat(result.data, "\n")
 end
 
 local function find_file(files, path)
@@ -94,6 +100,46 @@ describe("git adapter", function()
     assert.equals("M", file.status)
     assert.equals(1, file.insertions)
     assert.equals(1, file.deletions)
+  end)
+
+  it("loads only the selected added file diff against a base ref", function()
+    local repo = create_repo()
+    write_file(repo .. "/baseline.txt", "baseline\n")
+    commit_all(repo, "baseline")
+    run_git(repo, { "branch", "-M", "main" })
+    run_git(repo, { "checkout", "-b", "feature" })
+    write_file(repo .. "/added-one.txt", "one\n")
+    write_file(repo .. "/added-two.txt", "two\n")
+    commit_all(repo, "add files")
+
+    local files = diff_files(repo, "main")
+    local file = find_file(files, "added-one.txt")
+    assert.is_not_nil(file)
+
+    local content = file_diff_lines(repo, "main", file)
+    assert.is_truthy(content:find("added%-one%.txt"))
+    assert.is_truthy(content:find("+one", 1, true))
+    assert.is_nil(content:find("added-two.txt", 1, true))
+    assert.is_nil(content:find("+two", 1, true))
+  end)
+
+  it("loads only the selected staged added file diff", function()
+    local repo = create_repo()
+    write_file(repo .. "/baseline.txt", "baseline\n")
+    commit_all(repo, "baseline")
+    write_file(repo .. "/added-one.txt", "one\n")
+    write_file(repo .. "/added-two.txt", "two\n")
+    run_git(repo, { "add", "--", "added-one.txt", "added-two.txt" })
+
+    local files = diff_files(repo)
+    local file = find_file(files, "added-one.txt")
+    assert.is_not_nil(file)
+
+    local content = file_diff_lines(repo, nil, file)
+    assert.is_truthy(content:find("added%-one%.txt"))
+    assert.is_truthy(content:find("+one", 1, true))
+    assert.is_nil(content:find("added-two.txt", 1, true))
+    assert.is_nil(content:find("+two", 1, true))
   end)
 
   it("parses NUL-delimited paths without Git quote escaping", function()
