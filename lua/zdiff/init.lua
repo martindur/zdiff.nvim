@@ -122,9 +122,6 @@ function M.open()
   vim.bo[state.buf].swapfile = false
   vim.bo[state.buf].filetype = "zdiff"
   vim.api.nvim_win_set_buf(0, state.buf)
-
-  vim.keymap.set("n", "<CR>", M.open_source, { buffer = state.buf, silent = true })
-  vim.keymap.set("n", "<Tab>", M.toggle, { buffer = state.buf, silent = true })
   render()
 end
 

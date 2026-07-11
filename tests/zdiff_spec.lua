@@ -50,6 +50,7 @@ describe("zdiff", function()
     vim.cmd("cd " .. vim.fn.fnameescape(repo))
     zdiff.open()
     local diff_buf = vim.api.nvim_get_current_buf()
+    assert.same({}, vim.api.nvim_buf_get_keymap(diff_buf, "n"))
     assert.same({
       path = "one.txt",
       status = "M",

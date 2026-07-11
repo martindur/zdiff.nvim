@@ -4,7 +4,7 @@
 CONTENTS                                                        *zdiff-contents*
 
 1. Commands ..................................................... |zdiff-commands|
-2. Mappings ..................................................... |zdiff-mappings|
+2. Configuration ........................................... |zdiff-configuration|
 
 =============================================================================
 COMMANDS                                                        *zdiff-commands*
@@ -23,16 +23,25 @@ COMMANDS                                                        *zdiff-commands*
 :ZdiffRefresh           Reload uncommitted changes.
 
 =============================================================================
-MAPPINGS                                                        *zdiff-mappings*
+CONFIGURATION                                              *zdiff-configuration*
 
-The diff buffer maps <Tab> to toggle a file and <CR> to open source.
+Zdiff defines no keymaps. Configure buffer-local mappings with a FileType
+autocmd if desired: >lua
 
-The following <Plug> mappings are available for user configuration:
+    vim.api.nvim_create_autocmd("FileType", {
+      pattern = "zdiff",
+      callback = function(event)
+        local opts = { buffer = event.buf, silent = true }
 
-    <Plug>(zdiff-toggle)
-    <Plug>(zdiff-open)
-    <Plug>(zdiff-refresh)
+        vim.keymap.set("n", "<CR>", "<cmd>ZdiffOpen<cr>", opts)
+        vim.keymap.set("n", "<Tab>", "<cmd>ZdiffToggle<cr>", opts)
+        vim.keymap.set("n", "R", "<cmd>ZdiffRefresh<cr>", opts)
+        vim.keymap.set("n", "q", "<cmd>bdelete<cr>", opts)
+      end,
+    })
+<
 
-All other motions and operators retain their normal Neovim behavior.
+These are suggested mappings, not defaults. Unmapped keys retain their normal
+Neovim behavior.
 
 vim:tw=78:ts=8:noet:ft=help:norl:

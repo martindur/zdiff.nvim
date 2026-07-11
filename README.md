@@ -18,18 +18,33 @@ useful without spacing out the file overview.
 :Zdiff
 ```
 
-Inside the diff buffer:
+The plugin defines commands but no keymaps:
 
-- `<Tab>` expands or collapses the file under the cursor.
-- `<CR>` opens the source location under the cursor.
+| Command | Action |
+| --- | --- |
+| `:ZdiffToggle` | Toggle the file under the cursor |
+| `:ZdiffOpen` | Open the source location under the cursor |
+| `:ZdiffRefresh` | Reload uncommitted changes |
 
-Manual actions are also available as commands and `<Plug>` mappings:
+Use a `FileType` autocmd to choose how the diff buffer behaves. For example,
+these mappings reproduce the suggested defaults:
 
-| Command | Mapping | Action |
-| --- | --- | --- |
-| `:ZdiffToggle` | `<Plug>(zdiff-toggle)` | Toggle a file |
-| `:ZdiffOpen` | `<Plug>(zdiff-open)` | Open a source location |
-| `:ZdiffRefresh` | `<Plug>(zdiff-refresh)` | Reload uncommitted changes |
+```lua
+vim.api.nvim_create_autocmd("FileType", {
+  pattern = "zdiff",
+  callback = function(event)
+    local opts = { buffer = event.buf, silent = true }
+
+    vim.keymap.set("n", "<CR>", "<cmd>ZdiffOpen<cr>", opts)
+    vim.keymap.set("n", "<Tab>", "<cmd>ZdiffToggle<cr>", opts)
+    vim.keymap.set("n", "R", "<cmd>ZdiffRefresh<cr>", opts)
+    vim.keymap.set("n", "q", "<cmd>bdelete<cr>", opts)
+  end,
+})
+```
+
+These are examples rather than plugin defaults. Any omitted key retains its
+normal Neovim behavior.
 
 ## Current scope
 

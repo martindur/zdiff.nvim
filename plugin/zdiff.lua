@@ -18,7 +18,3 @@ end, { desc = "Expand or collapse the file at the cursor" })
 vim.api.nvim_create_user_command("ZdiffOpen", function()
   require("zdiff").open_source()
 end, { desc = "Open the source location at the cursor" })
-
-vim.keymap.set("n", "<Plug>(zdiff-toggle)", require("zdiff").toggle)
-vim.keymap.set("n", "<Plug>(zdiff-open)", require("zdiff").open_source)
-vim.keymap.set("n", "<Plug>(zdiff-refresh)", require("zdiff").refresh)
