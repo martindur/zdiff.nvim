@@ -16,8 +16,9 @@ for _, path in ipairs(plenary_paths) do
   end
 end
 
--- Add this plugin to runtimepath
-vim.opt.rtp:prepend(vim.fn.getcwd())
+-- Add this checkout to runtimepath, even when the test runner changes directory.
+local plugin_root = vim.fn.fnamemodify(vim.fn.expand("<sfile>:p"), ":h:h")
+vim.opt.rtp:prepend(plugin_root)
 
 -- Basic settings
 vim.cmd("runtime plugin/plenary.vim")
