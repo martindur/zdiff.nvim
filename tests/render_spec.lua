@@ -74,4 +74,9 @@ describe("zdiff renderer", function()
       "nine",
     }, result.lines)
   end)
+
+  it("names a base comparison", function()
+    local result = render.render({ base = "main", files = {} })
+    assert.equals("Changes since main", result.lines[1])
+  end)
 end)

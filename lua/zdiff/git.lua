@@ -44,6 +44,23 @@ local function has_head(root)
   return output ~= nil
 end
 
+local function comparison_target(root, base)
+  if base and base ~= "" then
+    if not has_head(root) then
+      return nil, "cannot compare a repository without HEAD to " .. base
+    end
+    local output, err = run(root, { "merge-base", base, "HEAD" })
+    if not output then
+      return nil, err
+    end
+    return vim.trim(output)
+  end
+  if has_head(root) then
+    return "HEAD"
+  end
+  return nil
+end
+
 local function line_count(path)
   local file = io.open(path, "r")
   if not file then
@@ -118,14 +135,18 @@ local function parse_statuses(output, stats)
   return files
 end
 
-function M.uncommitted_changes(root)
+function M.changes(root, base)
   local files = {}
-  if has_head(root) then
-    local statuses_output, err = run(root, { "diff", "--name-status", "-z", "HEAD" })
+  local target, target_err = comparison_target(root, base)
+  if target_err then
+    return nil, target_err
+  end
+  if target then
+    local statuses_output, err = run(root, { "diff", "--name-status", "-z", target })
     if not statuses_output then
       return nil, err
     end
-    local stats_output, stats_err = run(root, { "diff", "--numstat", "-z", "HEAD" })
+    local stats_output, stats_err = run(root, { "diff", "--numstat", "-z", target })
     if not stats_output then
       return nil, stats_err
     end
@@ -149,7 +170,7 @@ function M.uncommitted_changes(root)
   table.sort(files, function(left, right)
     return left.path < right.path
   end)
-  return { root = root, files = files }
+  return { root = root, base = base or "", target = target, files = files }
 end
 
 local function untracked_patch(root, path)
@@ -169,11 +190,11 @@ local function untracked_patch(root, path)
   return { { header = string.format("@@ -0,0 +1,%d @@", #lines), lines = lines } }
 end
 
-function M.patch(root, changed_file)
+function M.patch(root, target, changed_file)
   if changed_file.status == "?" then
     return untracked_patch(root, changed_file.path)
   end
-  local args = { "diff", "--unified=3", "HEAD", "--" }
+  local args = { "diff", "--unified=3", target, "--" }
   if changed_file.old_path then
     table.insert(args, changed_file.old_path)
   end

@@ -16,9 +16,16 @@ useful without spacing out the file overview.
 
 ```vim
 :Zdiff
+:Zdiff main
 ```
 
-The plugin defines commands but no keymaps:
+`:Zdiff` opens uncommitted changes. Passing a Git ref opens changes since its
+merge base with `HEAD`, including current staged, unstaged, and untracked work.
+Each repository and comparison has one reusable buffer with independent
+expansion and cursor state.
+
+The plugin defines no keymaps. `:Zdiff` is global; the action commands exist
+only inside a zdiff buffer:
 
 | Command | Action |
 | --- | --- |
@@ -39,6 +46,14 @@ vim.api.nvim_create_autocmd("FileType", {
     vim.keymap.set("n", "<Tab>", "<cmd>ZdiffToggle<cr>", opts)
     vim.keymap.set("n", "R", "<cmd>ZdiffRefresh<cr>", opts)
     vim.keymap.set("n", "q", "<cmd>bdelete<cr>", opts)
+
+    vim.keymap.set("n", "m", function()
+      if vim.b.zdiff.base == "" then
+        vim.cmd("Zdiff main")
+      else
+        vim.cmd("Zdiff")
+      end
+    end, opts)
   end,
 })
 ```
@@ -46,14 +61,21 @@ vim.api.nvim_create_autocmd("FileType", {
 These are examples rather than plugin defaults. Any omitted key retains its
 normal Neovim behavior.
 
+Every diff buffer exposes its comparison context for filetype configuration:
+
+```lua
+vim.b.zdiff.root -- repository root
+vim.b.zdiff.base -- empty for uncommitted changes, otherwise the requested ref
+```
+
 ## Current scope
 
-The rewrite intentionally supports only uncommitted changes against `HEAD`.
-It uses synchronous Git commands and standard Neovim diff highlight groups.
+The rewrite uses synchronous Git commands and standard Neovim diff highlight
+groups.
 
-There is currently no configuration, automatic refresh, arbitrary-ref mode,
-sticky winbar, help window, icon set, or Treesitter highlighting. Optional
-features will be evaluated individually after the core workflow has been used.
+There is currently no setup function, automatic refresh, sticky winbar, help
+window, icon set, or Treesitter highlighting. Optional features will be
+evaluated individually after the core workflow has been used.
 
 ## Development
 

@@ -33,6 +33,15 @@ describe("zdiff", function()
     original_directory = vim.fn.getcwd()
   end)
 
+  local function current_session()
+    local buf = vim.api.nvim_get_current_buf()
+    for _, session in pairs(zdiff._sessions) do
+      if session.buf == buf then
+        return session
+      end
+    end
+  end
+
   after_each(function()
     vim.cmd("cd " .. vim.fn.fnameescape(original_directory))
     for _, buffer in ipairs(vim.api.nvim_list_bufs()) do
@@ -50,14 +59,15 @@ describe("zdiff", function()
     vim.cmd("cd " .. vim.fn.fnameescape(repo))
     zdiff.open()
     local diff_buf = vim.api.nvim_get_current_buf()
+    local session = assert(current_session())
     assert.same({
       path = "one.txt",
       status = "M",
       additions = 1,
       deletions = 1,
-    }, zdiff._state.model.files[1])
+    }, session.model.files[1])
     vim.api.nvim_win_set_cursor(0, { 3, 0 })
-    zdiff.toggle()
+    vim.cmd("ZdiffToggle")
 
     local lines = vim.api.nvim_buf_get_lines(diff_buf, 0, -1, false)
     local changed_line
@@ -73,8 +83,8 @@ describe("zdiff", function()
       path = "one.txt",
       line = 2,
       deleted = false,
-    }, zdiff._state.rendered.sources[changed_line])
-    zdiff.open_source()
+    }, session.rendered.sources[changed_line])
+    vim.cmd("ZdiffOpen")
     assert.equals(repo .. "/one.txt", vim.api.nvim_buf_get_name(0))
     assert.equals(2, vim.api.nvim_win_get_cursor(0)[1])
 
@@ -93,8 +103,9 @@ describe("zdiff", function()
     vim.cmd("cd " .. vim.fn.fnameescape(repo))
     zdiff.open()
     local diff_buf = vim.api.nvim_get_current_buf()
+    local session = assert(current_session())
     vim.api.nvim_win_set_cursor(0, { 3, 0 })
-    zdiff.toggle()
+    vim.cmd("ZdiffToggle")
     local header
     for line, text in ipairs(vim.api.nvim_buf_get_lines(diff_buf, 0, -1, false)) do
       if text:find("@@", 1, true) then
@@ -103,10 +114,10 @@ describe("zdiff", function()
     end
     assert.is_not_nil(header)
     vim.api.nvim_win_set_cursor(0, { header, 0 })
-    zdiff.toggle()
-    assert.is_false(zdiff._state.model.files[1].expanded)
-    zdiff.toggle()
-    assert.is_true(zdiff._state.model.files[1].expanded)
+    vim.cmd("ZdiffToggle")
+    assert.is_false(session.model.files[1].expanded)
+    vim.cmd("ZdiffToggle")
+    assert.is_true(session.model.files[1].expanded)
 
     local changed_line
     for line, text in ipairs(vim.api.nvim_buf_get_lines(diff_buf, 0, -1, false)) do
@@ -115,9 +126,9 @@ describe("zdiff", function()
       end
     end
     vim.api.nvim_win_set_cursor(0, { changed_line, 0 })
-    zdiff.open_source()
-    zdiff.toggle()
-    assert.is_true(zdiff._state.model.files[1].expanded)
+    vim.cmd("ZdiffOpen")
+    assert.equals(0, vim.fn.exists(":ZdiffToggle"))
+    assert.is_true(session.model.files[1].expanded)
 
     zdiff.open()
     assert.equals(diff_buf, vim.api.nvim_get_current_buf())
@@ -128,7 +139,7 @@ describe("zdiff", function()
     vim.cmd("cd " .. vim.fn.fnameescape(repo))
     zdiff.open()
     vim.api.nvim_win_set_cursor(0, { 3, 0 })
-    zdiff.toggle()
+    vim.cmd("ZdiffToggle")
     local function find_changed()
       for line, text in ipairs(vim.api.nvim_buf_get_lines(0, 0, -1, false)) do
         if text == "changed" then
@@ -138,7 +149,50 @@ describe("zdiff", function()
     end
     vim.api.nvim_win_set_cursor(0, { find_changed(), 0 })
     write(repo .. "/before.txt", "new\n")
-    zdiff.refresh()
+    vim.cmd("ZdiffRefresh")
     assert.equals("changed", vim.api.nvim_get_current_line())
+  end)
+
+  it("keeps independent positions and expansions for each comparison", function()
+    local repo = fixture()
+    run_git(repo, { "branch", "-M", "main" })
+    vim.cmd("cd " .. vim.fn.fnameescape(repo))
+
+    zdiff.open()
+    local uncommitted = assert(current_session())
+    local uncommitted_buf = uncommitted.buf
+    assert.same({ root = repo, base = "" }, vim.b.zdiff)
+    vim.api.nvim_win_set_cursor(0, { 3, 0 })
+    vim.cmd("ZdiffToggle")
+
+    zdiff.open("main")
+    local main = assert(current_session())
+    assert.are_not.equals(uncommitted_buf, main.buf)
+    assert.same({ root = repo, base = "main" }, vim.b.zdiff)
+    vim.api.nvim_win_set_cursor(0, { 3, 0 })
+    vim.cmd("ZdiffToggle")
+
+    zdiff.open()
+    assert.equals(uncommitted_buf, vim.api.nvim_get_current_buf())
+    assert.is_true(uncommitted.model.files[1].expanded)
+    assert.equals(3, vim.api.nvim_win_get_cursor(0)[1])
+
+    zdiff.open("main")
+    assert.equals(main.buf, vim.api.nvim_get_current_buf())
+    assert.is_true(main.model.files[1].expanded)
+  end)
+
+  it("forgets a session deleted with the native buffer command", function()
+    local repo = fixture()
+    vim.cmd("cd " .. vim.fn.fnameescape(repo))
+    zdiff.open()
+    local original = assert(current_session())
+    vim.cmd("bdelete")
+    for _, session in pairs(zdiff._sessions) do
+      assert.are_not.equals(original, session)
+    end
+
+    zdiff.open()
+    assert.are_not.equals(original.buf, assert(current_session()).buf)
   end)
 end)

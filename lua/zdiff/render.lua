@@ -28,7 +28,9 @@ function M.render(model)
     return #rendered.lines
   end
 
-  add("Uncommitted changes", "Title")
+  local base = model.base or ""
+  local title = base == "" and "Uncommitted changes" or ("Changes since " .. base)
+  add(title, "Title")
   add("")
   if #model.files == 0 then
     add("No changes found", "Comment")

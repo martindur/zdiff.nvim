@@ -34,7 +34,7 @@ describe("zdiff git", function()
   it("lists untracked files before the first commit", function()
     local repo = repository()
     write(repo .. "/new file.txt", "one\ntwo\n")
-    local changes = assert(git.uncommitted_changes(repo))
+    local changes = assert(git.changes(repo))
     assert.same({
       path = "new file.txt",
       status = "?",
@@ -49,7 +49,7 @@ describe("zdiff git", function()
     write(repo .. "/staged.txt", "new\n")
     run_git(repo, { "add", "staged.txt" })
     write(repo .. "/unstaged.txt", "new\n")
-    local changes = assert(git.uncommitted_changes(repo))
+    local changes = assert(git.changes(repo))
     assert.equals(2, #changes.files)
     assert.same({ additions = 1, deletions = 1 }, {
       additions = changes.files[1].additions,
@@ -66,7 +66,7 @@ describe("zdiff git", function()
     commit(repo, { ["delete.txt"] = "gone\n", ["old name.txt"] = "same\n" })
     run_git(repo, { "mv", "old name.txt", "new name.txt" })
     run_git(repo, { "rm", "delete.txt" })
-    local changes = assert(git.uncommitted_changes(repo))
+    local changes = assert(git.changes(repo))
     assert.same({
       path = "delete.txt",
       status = "D",
@@ -93,12 +93,29 @@ describe("zdiff git", function()
     for _, name in ipairs(names) do
       write(repo .. "/" .. name, "new\n")
     end
-    local changes = assert(git.uncommitted_changes(repo))
+    local changes = assert(git.changes(repo))
     local actual = {}
     for _, file in ipairs(changes.files) do
       table.insert(actual, file.path)
     end
     table.sort(names)
     assert.same(names, actual)
+  end)
+
+  it("includes committed and working-tree changes relative to a base", function()
+    local repo = repository()
+    commit(repo, { ["baseline.txt"] = "old\n" })
+    run_git(repo, { "branch", "-M", "main" })
+    run_git(repo, { "switch", "-qc", "feature" })
+    write(repo .. "/committed.txt", "committed\n")
+    run_git(repo, { "add", "committed.txt" })
+    run_git(repo, { "commit", "-qm", "feature" })
+    write(repo .. "/working.txt", "working\n")
+
+    local changes = assert(git.changes(repo, "main"))
+    assert.equals("main", changes.base)
+    assert.equals(2, #changes.files)
+    assert.equals("committed.txt", changes.files[1].path)
+    assert.equals("working.txt", changes.files[2].path)
   end)
 end)
