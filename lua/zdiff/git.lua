@@ -3,18 +3,28 @@ local M = {}
 local function run(root, args)
   local argv = { "git", "-C", root }
   vim.list_extend(argv, args)
+
+  if vim.system then
+    local result = vim.system(argv, { text = false }):wait()
+    if result.code ~= 0 then
+      return nil, vim.trim(result.stderr or "")
+    end
+    return result.stdout or ""
+  end
+
   local output = vim.fn.system(argv)
   if vim.v.shell_error ~= 0 then
     return nil, vim.trim(output)
   end
-  return output
+  -- system() represents NUL bytes as SOH; restore them for -z Git output.
+  return output:gsub("\1", "\0")
 end
 
-local function split_lines(output)
+local function split_nul(output)
   if not output or output == "" then
     return {}
   end
-  local parts = vim.split(output, "\n", { plain = true })
+  local parts = vim.split(output, "\0", { plain = true })
   if parts[#parts] == "" then
     table.remove(parts)
   end
@@ -27,6 +37,11 @@ function M.root()
     return nil, err
   end
   return vim.trim(output)
+end
+
+local function has_head(root)
+  local output = run(root, { "rev-parse", "--verify", "HEAD" })
+  return output ~= nil
 end
 
 local function line_count(path)
@@ -42,53 +57,87 @@ local function line_count(path)
   return count
 end
 
-function M.uncommitted_changes(root)
-  local statuses_output, err = run(root, { "diff", "--name-status", "HEAD" })
-  if not statuses_output then
-    return nil, err
-  end
-  local stats_output, stats_err = run(root, { "diff", "--numstat", "HEAD" })
-  if not stats_output then
-    return nil, stats_err
-  end
+local function rename_key(old_path, new_path)
+  return old_path .. "\0" .. new_path
+end
 
+local function parse_stats(output)
   local stats = {}
-  for _, record in ipairs(split_lines(stats_output)) do
-    local additions, deletions, path = record:match("^([^\t]+)\t([^\t]+)\t(.+)$")
-    if path then
-      stats[path] = {
-        additions = tonumber(additions) or 0,
-        deletions = tonumber(deletions) or 0,
-      }
+  local parts = split_nul(output)
+  local index = 1
+  while index <= #parts do
+    local additions, deletions, path = parts[index]:match("^([^\t]+)\t([^\t]+)\t(.*)$")
+    index = index + 1
+    if additions and deletions then
+      local key = path
+      if path == "" then
+        local old_path, new_path = parts[index], parts[index + 1]
+        index = index + 2
+        if old_path and new_path then
+          key = rename_key(old_path, new_path)
+        end
+      end
+      if key and key ~= "" then
+        stats[key] = {
+          additions = tonumber(additions) or 0,
+          deletions = tonumber(deletions) or 0,
+        }
+      end
     end
   end
+  return stats
+end
 
+local function parse_statuses(output, stats)
   local files = {}
-  for _, record in ipairs(split_lines(statuses_output)) do
-    local fields = vim.split(record, "\t", { plain = true })
-    local status = fields[1]:sub(1, 1)
-    local path = fields[2]
-    local old_path
+  local parts = split_nul(output)
+  local index = 1
+  while index <= #parts do
+    local status = parts[index]:sub(1, 1)
+    index = index + 1
+    local old_path, path
     if status == "R" or status == "C" then
-      old_path = path
-      path = fields[3]
+      old_path, path = parts[index], parts[index + 1]
+      index = index + 2
+    else
+      path = parts[index]
+      index = index + 1
     end
-    local counts = stats[path] or stats[old_path] or {}
-    table.insert(files, {
-      path = path,
-      old_path = old_path,
-      status = status,
-      additions = counts.additions or 0,
-      deletions = counts.deletions or 0,
-    })
+    if path then
+      local key = old_path and rename_key(old_path, path) or path
+      local counts = stats[key] or {}
+      table.insert(files, {
+        path = path,
+        old_path = old_path,
+        status = status,
+        additions = counts.additions or 0,
+        deletions = counts.deletions or 0,
+      })
+    end
+  end
+  return files
+end
+
+function M.uncommitted_changes(root)
+  local files = {}
+  if has_head(root) then
+    local statuses_output, err = run(root, { "diff", "--name-status", "-z", "HEAD" })
+    if not statuses_output then
+      return nil, err
+    end
+    local stats_output, stats_err = run(root, { "diff", "--numstat", "-z", "HEAD" })
+    if not stats_output then
+      return nil, stats_err
+    end
+    files = parse_statuses(statuses_output, parse_stats(stats_output))
   end
 
   local untracked_output, untracked_err =
-    run(root, { "ls-files", "--others", "--exclude-standard" })
+    run(root, { "ls-files", "--others", "--exclude-standard", "-z" })
   if not untracked_output then
     return nil, untracked_err
   end
-  for _, path in ipairs(split_lines(untracked_output)) do
+  for _, path in ipairs(split_nul(untracked_output)) do
     table.insert(files, {
       path = path,
       status = "?",
@@ -113,7 +162,6 @@ local function untracked_patch(root, path)
     table.insert(lines, {
       kind = "add",
       text = line,
-      old_line = nil,
       new_line = #lines + 1,
     })
   end

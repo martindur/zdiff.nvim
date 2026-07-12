@@ -32,20 +32,66 @@ local function current_line()
   return vim.api.nvim_win_get_cursor(0)[1]
 end
 
+local function buffer_is_valid()
+  return state.buf and vim.api.nvim_buf_is_valid(state.buf)
+end
+
+local function in_zdiff_buffer()
+  return buffer_is_valid() and vim.api.nvim_get_current_buf() == state.buf
+end
+
 local function file_at_cursor()
-  local line = current_line()
-  local file_index = state.rendered.file_lines[line]
-  if file_index then
-    return file_index
+  return state.rendered.file_at_line[current_line()]
+end
+
+local function cursor_position()
+  if not in_zdiff_buffer() then
+    return nil
   end
-  local target = state.rendered.targets[line]
-  return target and target.file_index or nil
+  local line = current_line()
+  local source = state.rendered.sources[line]
+  local file_index = state.rendered.file_at_line[line]
+  local file = file_index and state.model.files[file_index] or nil
+  return {
+    path = source and source.path or (file and file.path),
+    source_line = source and source.line or nil,
+  }
+end
+
+local function restore_cursor(position)
+  if not position or not position.path or not in_zdiff_buffer() then
+    return
+  end
+  local fallback
+  for line, file_index in pairs(state.rendered.file_lines) do
+    if state.model.files[file_index].path == position.path then
+      fallback = line
+      break
+    end
+  end
+  local target = fallback
+  if position.source_line then
+    for line, source in pairs(state.rendered.sources) do
+      if
+        source.path == position.path
+        and source.line == position.source_line
+        and not source.deleted
+      then
+        target = line
+        break
+      end
+    end
+  end
+  if target then
+    vim.api.nvim_win_set_cursor(0, { target, 0 })
+  end
 end
 
 function M.refresh()
-  if not state.model then
+  if not state.model or not buffer_is_valid() then
     return
   end
+  local position = cursor_position()
   local change_set, err = git.uncommitted_changes(state.model.root)
   if not change_set then
     notify(err or "could not load changes", vim.log.levels.ERROR)
@@ -65,9 +111,13 @@ function M.refresh()
     end
   end
   render()
+  restore_cursor(position)
 end
 
 function M.toggle()
+  if not in_zdiff_buffer() then
+    return
+  end
   local file_index = file_at_cursor()
   if not file_index then
     return
@@ -91,7 +141,10 @@ function M.toggle()
 end
 
 function M.open_source()
-  local target = state.rendered and state.rendered.targets[current_line()]
+  if not in_zdiff_buffer() then
+    return
+  end
+  local target = state.rendered and state.rendered.sources[current_line()]
   if not target or target.deleted then
     return
   end
@@ -108,6 +161,15 @@ function M.open()
     notify(root_err or "not in a Git repository", vim.log.levels.ERROR)
     return
   end
+  if buffer_is_valid() and state.model and state.model.root == root then
+    vim.api.nvim_win_set_buf(0, state.buf)
+    M.refresh()
+    return
+  end
+  if buffer_is_valid() then
+    vim.api.nvim_buf_delete(state.buf, { force = true })
+  end
+
   local change_set, err = git.uncommitted_changes(root)
   if not change_set then
     notify(err or "could not load changes", vim.log.levels.ERROR)

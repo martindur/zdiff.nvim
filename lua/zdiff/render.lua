@@ -10,9 +10,18 @@ local status_names = {
 }
 
 function M.render(model)
-  local rendered = { lines = {}, targets = {}, file_lines = {}, highlights = {} }
-  local function add(line, highlight)
+  local rendered = {
+    lines = {},
+    sources = {},
+    file_at_line = {},
+    file_lines = {},
+    highlights = {},
+  }
+  local function add(line, highlight, file_index)
     table.insert(rendered.lines, line)
+    if file_index then
+      rendered.file_at_line[#rendered.lines] = file_index
+    end
     if highlight then
       table.insert(rendered.highlights, { line = #rendered.lines, group = highlight })
     end
@@ -34,9 +43,9 @@ function M.render(model)
       file.additions,
       file.deletions
     )
-    local line = add(label, "Directory")
+    local line = add(label, "Directory", file_index)
     rendered.file_lines[line] = file_index
-    rendered.targets[line] = {
+    rendered.sources[line] = {
       file_index = file_index,
       path = file.path,
       line = 1,
@@ -46,15 +55,15 @@ function M.render(model)
     if file.expanded then
       for hunk_index, hunk in ipairs(file.patch or {}) do
         if hunk_index > 1 then
-          add("")
+          add("", nil, file_index)
         end
-        add(hunk.header, "Comment")
+        add(hunk.header, "Comment", file_index)
         for _, patch_line in ipairs(hunk.lines) do
           local group = patch_line.kind == "add" and "DiffAdd"
             or patch_line.kind == "delete" and "DiffDelete"
             or nil
-          local patch_lnum = add(patch_line.text, group)
-          rendered.targets[patch_lnum] = {
+          local patch_lnum = add(patch_line.text, group, file_index)
+          rendered.sources[patch_lnum] = {
             file_index = file_index,
             path = file.path,
             line = patch_line.new_line or patch_line.old_line,

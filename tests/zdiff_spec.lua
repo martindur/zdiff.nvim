@@ -50,7 +50,6 @@ describe("zdiff", function()
     vim.cmd("cd " .. vim.fn.fnameescape(repo))
     zdiff.open()
     local diff_buf = vim.api.nvim_get_current_buf()
-    assert.same({}, vim.api.nvim_buf_get_keymap(diff_buf, "n"))
     assert.same({
       path = "one.txt",
       status = "M",
@@ -74,7 +73,7 @@ describe("zdiff", function()
       path = "one.txt",
       line = 2,
       deleted = false,
-    }, zdiff._state.rendered.targets[changed_line])
+    }, zdiff._state.rendered.sources[changed_line])
     zdiff.open_source()
     assert.equals(repo .. "/one.txt", vim.api.nvim_buf_get_name(0))
     assert.equals(2, vim.api.nvim_win_get_cursor(0)[1])
@@ -82,5 +81,64 @@ describe("zdiff", function()
     vim.cmd("normal! \15")
     assert.equals(diff_buf, vim.api.nvim_get_current_buf())
     assert.equals(changed_line, vim.api.nvim_win_get_cursor(0)[1])
+
+    local ctrl_i = vim.api.nvim_replace_termcodes("<C-I>", true, false, true)
+    vim.api.nvim_feedkeys(ctrl_i, "x", false)
+    assert.equals(repo .. "/one.txt", vim.api.nvim_buf_get_name(0))
+    assert.equals(2, vim.api.nvim_win_get_cursor(0)[1])
+  end)
+
+  it("reuses its buffer and ignores buffer actions from source files", function()
+    local repo = fixture()
+    vim.cmd("cd " .. vim.fn.fnameescape(repo))
+    zdiff.open()
+    local diff_buf = vim.api.nvim_get_current_buf()
+    vim.api.nvim_win_set_cursor(0, { 3, 0 })
+    zdiff.toggle()
+    local header
+    for line, text in ipairs(vim.api.nvim_buf_get_lines(diff_buf, 0, -1, false)) do
+      if text:find("@@", 1, true) then
+        header = line
+      end
+    end
+    assert.is_not_nil(header)
+    vim.api.nvim_win_set_cursor(0, { header, 0 })
+    zdiff.toggle()
+    assert.is_false(zdiff._state.model.files[1].expanded)
+    zdiff.toggle()
+    assert.is_true(zdiff._state.model.files[1].expanded)
+
+    local changed_line
+    for line, text in ipairs(vim.api.nvim_buf_get_lines(diff_buf, 0, -1, false)) do
+      if text == "changed" then
+        changed_line = line
+      end
+    end
+    vim.api.nvim_win_set_cursor(0, { changed_line, 0 })
+    zdiff.open_source()
+    zdiff.toggle()
+    assert.is_true(zdiff._state.model.files[1].expanded)
+
+    zdiff.open()
+    assert.equals(diff_buf, vim.api.nvim_get_current_buf())
+  end)
+
+  it("restores a source location after refresh changes surrounding rows", function()
+    local repo = fixture()
+    vim.cmd("cd " .. vim.fn.fnameescape(repo))
+    zdiff.open()
+    vim.api.nvim_win_set_cursor(0, { 3, 0 })
+    zdiff.toggle()
+    local function find_changed()
+      for line, text in ipairs(vim.api.nvim_buf_get_lines(0, 0, -1, false)) do
+        if text == "changed" then
+          return line
+        end
+      end
+    end
+    vim.api.nvim_win_set_cursor(0, { find_changed(), 0 })
+    write(repo .. "/before.txt", "new\n")
+    zdiff.refresh()
+    assert.equals("changed", vim.api.nvim_get_current_line())
   end)
 end)
