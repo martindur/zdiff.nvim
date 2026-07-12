@@ -69,8 +69,8 @@ function Session:render()
       namespace,
       highlight.group,
       highlight.line - 1,
-      0,
-      -1
+      highlight.start_col,
+      highlight.end_col
     )
   end
   vim.bo[self.buf].modifiable = false

@@ -11,11 +11,18 @@ describe("zdiff renderer", function()
     assert.same({
       "Uncommitted changes",
       "",
-      "modified  one.lua  +2 -1",
-      "untracked  two.lua  +3 -0",
+      "one.lua  +2 -1",
+      "two.lua  +3 -0",
     }, result.lines)
     assert.equals(1, result.file_lines[3])
     assert.equals(2, result.file_lines[4])
+    assert.same({
+      { line = 1, group = "Title", start_col = 0, end_col = -1 },
+      { line = 3, group = "Directory", start_col = 0, end_col = 7 },
+      { line = 3, group = "DiffAdd", start_col = 9, end_col = 11 },
+      { line = 3, group = "DiffDelete", start_col = 12, end_col = -1 },
+      { line = 4, group = "DiffAdd", start_col = 0, end_col = -1 },
+    }, result.highlights)
   end)
 
   it("renders plain patch text with source targets", function()
@@ -66,7 +73,7 @@ describe("zdiff renderer", function()
     assert.same({
       "Uncommitted changes",
       "",
-      "modified  one.lua  +2 -0",
+      "one.lua  +2 -0",
       "@@ -1 +1 @@",
       "one",
       "",
@@ -78,5 +85,19 @@ describe("zdiff renderer", function()
   it("names a base comparison", function()
     local result = render.render({ base = "main", files = {} })
     assert.equals("Changes since main", result.lines[1])
+  end)
+
+  it("highlights added and deleted files across the full row", function()
+    local result = render.render({
+      files = {
+        { path = "added.lua", status = "A", additions = 4, deletions = 0 },
+        { path = "deleted.lua", status = "D", additions = 0, deletions = 8 },
+      },
+    })
+    assert.same({
+      { line = 1, group = "Title", start_col = 0, end_col = -1 },
+      { line = 3, group = "DiffAdd", start_col = 0, end_col = -1 },
+      { line = 4, group = "DiffDelete", start_col = 0, end_col = -1 },
+    }, result.highlights)
   end)
 end)
