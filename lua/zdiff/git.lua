@@ -18,7 +18,7 @@ local M = {}
 ---@param args string[]
 ---@return string[]
 local function git_argv(root, args)
-  local argv = { "git", "-C", root }
+  local argv = { "git", "-C", root, "-c", "color.ui=never" }
   vim.list_extend(argv, args)
   return argv
 end
@@ -110,7 +110,7 @@ end
 
 ---@return {ok: boolean, data?: string, error?: string}
 function M.root()
-  local argv = { "git", "-C", vim.fn.getcwd(), "rev-parse", "--show-toplevel" }
+  local argv = { "git", "-C", vim.fn.getcwd(), "-c", "color.ui=never", "rev-parse", "--show-toplevel"}
   local stdout = vim.fn.system(argv)
   local result = build_result(argv, vim.v.shell_error, stdout, "")
   if not result.ok then
