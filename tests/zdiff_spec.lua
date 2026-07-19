@@ -2,7 +2,7 @@ local zdiff = require("zdiff")
 local git = require("zdiff.git")
 
 local function run_git(repo, args)
-  local argv = { "git", "-C", repo }
+  local argv = { "git", "-C", repo, "-c", "color.ui=never" }
   vim.list_extend(argv, args)
   local out = vim.fn.system(argv)
   if vim.v.shell_error ~= 0 then
