@@ -6,6 +6,7 @@ function M.render(model)
     sources = {},
     file_at_line = {},
     file_lines = {},
+    patch_rows = {},
     highlights = {},
   }
   local function add(line, highlight, file_index, start_col, end_col)
@@ -80,15 +81,18 @@ function M.render(model)
 
     if file.expanded then
       for hunk_index, hunk in ipairs(file.patch or {}) do
+        rendered.patch_rows[file_index] = rendered.patch_rows[file_index] or {}
+        rendered.patch_rows[file_index][hunk_index] = {}
         if hunk_index > 1 then
           add("", nil, file_index)
         end
         add(hunk.header, "Comment", file_index)
-        for _, patch_line in ipairs(hunk.lines) do
+        for patch_line_index, patch_line in ipairs(hunk.lines) do
           local group = patch_line.kind == "add" and "DiffAdd"
             or patch_line.kind == "delete" and "DiffDelete"
             or nil
           local patch_lnum = add(patch_line.text, group, file_index)
+          rendered.patch_rows[file_index][hunk_index][patch_line_index] = patch_lnum
           rendered.sources[patch_lnum] = {
             file_index = file_index,
             path = file.path,

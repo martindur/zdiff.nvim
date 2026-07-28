@@ -68,14 +68,26 @@ vim.b.zdiff.root -- repository root
 vim.b.zdiff.base -- empty for uncommitted changes, otherwise the requested ref
 ```
 
+## Syntax highlighting
+
+Expanded hunks are syntax highlighted when Neovim can find a Treesitter parser
+and highlight query for the changed file. This is a best-effort enhancement:
+missing parsers, unsupported filetypes, and unusually large patches retain the
+ordinary diff highlighting without an error.
+
+Each hunk is parsed locally. This keeps highlighting independent from Git
+loading and navigation, though a fragment beginning inside a larger language
+construct may receive incomplete highlighting.
+
 ## Current scope
 
-The rewrite uses synchronous Git commands and standard Neovim diff highlight
-groups.
+The rewrite uses synchronous Git commands, standard Neovim diff highlight
+groups, and optional Treesitter highlighting from Neovim's built-in APIs.
 
 There is currently no setup function, automatic refresh, sticky winbar, help
-window, icon set, or Treesitter highlighting. Optional features will be
-evaluated individually after the core workflow has been used.
+window, icon set, syntax configuration, or custom language integration.
+Optional features will be evaluated individually after the core workflow has
+been used.
 
 ## Development
 

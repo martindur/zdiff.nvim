@@ -1,11 +1,13 @@
 local git = require("zdiff.git")
 local model = require("zdiff.model")
 local renderer = require("zdiff.render")
+local syntax = require("zdiff.syntax")
 
 local Session = {}
 Session.__index = Session
 
 local namespace = vim.api.nvim_create_namespace("zdiff")
+local syntax_namespace = vim.api.nvim_create_namespace("zdiff.syntax")
 
 local function notify(message, level)
   vim.notify("[zdiff] " .. message, level or vim.log.levels.INFO)
@@ -63,6 +65,7 @@ function Session:render()
   vim.bo[self.buf].modifiable = true
   vim.api.nvim_buf_set_lines(self.buf, 0, -1, false, self.rendered.lines)
   vim.api.nvim_buf_clear_namespace(self.buf, namespace, 0, -1)
+  vim.api.nvim_buf_clear_namespace(self.buf, syntax_namespace, 0, -1)
   for _, highlight in ipairs(self.rendered.highlights) do
     vim.api.nvim_buf_add_highlight(
       self.buf,
@@ -71,6 +74,20 @@ function Session:render()
       highlight.line - 1,
       highlight.start_col,
       highlight.end_col
+    )
+  end
+  local syntax_highlights = syntax.highlights(self.model.files, self.rendered.patch_rows)
+  for _, highlight in ipairs(syntax_highlights) do
+    vim.api.nvim_buf_set_extmark(
+      self.buf,
+      syntax_namespace,
+      highlight.line - 1,
+      highlight.start_col,
+      {
+        end_col = highlight.end_col,
+        hl_group = highlight.group,
+        priority = highlight.priority,
+      }
     )
   end
   vim.bo[self.buf].modifiable = false

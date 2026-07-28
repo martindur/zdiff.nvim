@@ -52,6 +52,7 @@ describe("zdiff renderer", function()
     assert.equals(2, result.sources[6].line)
     assert.equals(1, result.file_at_line[4])
     assert.equals(1, result.file_at_line[5])
+    assert.same({ [1] = { [1] = { 5, 6 } } }, result.patch_rows)
   end)
 
   it("separates distinct hunks with one blank line", function()
