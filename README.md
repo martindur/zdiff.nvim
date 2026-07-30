@@ -1,242 +1,100 @@
 # zdiff.nvim
 
-A minimal, fast git diff viewer for Neovim with treesitter syntax highlighting.
+An experimental, small Git diff viewer for Neovim.
 
-Inspired by [Zed's](https://zed.dev) multi-buffer diff view - a clean, collapsible interface for reviewing changes across multiple files in a single view.
+This branch is a ground-up rewrite focused on one review loop:
 
-<img width="50%" height="50%" alt="image" src="https://github.com/user-attachments/assets/cb03976a-3d0c-4554-8d05-f712e030c52c" /><img width="50%" height="50%" alt="image" src="https://github.com/user-attachments/assets/f38c871a-3ca6-490a-8727-26f8275a0bf1" />
+1. See which uncommitted files changed and by how much.
+2. Expand selected files to inspect their patches.
+3. Open a changed source line and use `<C-o>` to return to the diff.
 
-Easily yank changes without including git markers or hunk headers
-
-<img width="50%" height="50%" alt="image" src="https://github.com/user-attachments/assets/7b274b5d-db18-4e02-b277-03b633bf9d04" />
-
-## Features
-
-- View uncommitted changes or changes compared to any git ref
-- Expand/collapse files to see inline diffs
-- Treesitter syntax highlighting in diff views
-- Sticky file headers while scrolling expanded diffs
-- Jump directly to source files at the correct line
-- Auto-refresh when returning to zdiff buffer
-- Tab completion for branch/tag names
-- Configurable keymaps and icons
-
-## Requirements
-
-- Neovim >= 0.9.0
-- git
-- (Optional) nvim-treesitter for syntax highlighting in diffs
-
-## Installation
-
-### [lazy.nvim](https://github.com/folke/lazy.nvim)
-
-```lua
-{
-  "martindur/zdiff.nvim",
-  cmd = "Zdiff",
-  keys = {
-    { "<leader>zd", "<cmd>Zdiff<cr>", desc = "Zdiff (uncommitted)" },
-    { "<leader>zD", "<cmd>Zdiff main<cr>", desc = "Zdiff (vs main)" },
-  },
-  opts = {},
-}
-```
-
-Or with lua function keymaps:
-
-```lua
-{
-  "martindur/zdiff.nvim",
-  cmd = "Zdiff",
-  keys = {
-    { "<leader>zd", function() require("zdiff").open() end, desc = "Zdiff (uncommitted)" },
-    { "<leader>zD", function() require("zdiff").open("main") end, desc = "Zdiff (vs main)" },
-  },
-  opts = {},
-}
-```
-
-### [packer.nvim](https://github.com/wbthomason/packer.nvim)
-
-```lua
-use {
-  "martindur/zdiff.nvim",
-  config = function()
-    require("zdiff").setup()
-
-    vim.keymap.set("n", "<leader>zd", function() require("zdiff").open() end, { desc = "Zdiff (uncommitted)" })
-    vim.keymap.set("n", "<leader>zD", function() require("zdiff").open("main") end, { desc = "Zdiff (vs main)" })
-  end,
-}
-```
-
-### [vim-plug](https://github.com/junegunn/vim-plug)
-
-```vim
-Plug 'martindur/zdiff.nvim'
-```
-
-```lua
--- In your init.lua or after/plugin/zdiff.lua:
-require("zdiff").setup()
-
-vim.keymap.set("n", "<leader>zd", function() require("zdiff").open() end, { desc = "Zdiff (uncommitted)" })
-vim.keymap.set("n", "<leader>zD", function() require("zdiff").open("main") end, { desc = "Zdiff (vs main)" })
-```
+The rendered diff is ordinary text with real blank-line boundaries between
+hunks, so native motions such as `{`, `}`, search, marks, and operators remain
+useful without spacing out the file overview.
 
 ## Usage
 
-### Command
-
 ```vim
-:Zdiff [ref]
+:Zdiff
+:Zdiff main
 ```
 
-| Example | Description |
-|---------|-------------|
-| `:Zdiff` | Uncommitted changes (diff vs HEAD) |
-| `:Zdiff main` | Changes compared to `main` branch |
-| `:Zdiff develop` | Changes compared to `develop` branch |
-| `:Zdiff v1.0.0` | Changes compared to tag `v1.0.0` |
-| `:Zdiff HEAD~5` | Changes compared to 5 commits ago |
-| `:Zdiff origin/feature` | Changes compared to remote branch |
+`:Zdiff` opens uncommitted changes. Passing a Git ref opens changes since its
+merge base with `HEAD`, including current staged, unstaged, and untracked work.
+Each repository and comparison has one reusable buffer with independent
+expansion and cursor state.
 
-Tab completion is available for branch and tag names.
+The plugin defines no keymaps. `:Zdiff` is global; the action commands exist
+only inside a zdiff buffer:
 
-### Keymaps (in zdiff buffer)
+| Command | Action |
+| --- | --- |
+| `:ZdiffToggle` | Toggle the file under the cursor |
+| `:ZdiffOpen` | Open the source location under the cursor |
+| `:ZdiffRefresh` | Reload uncommitted changes |
 
-| Key | Action |
-|-----|--------|
-| `<CR>` | Go to file/line under cursor |
-| `<Tab>` | Toggle expand/collapse file |
-| `m` | Toggle between uncommitted and branch mode |
-| `R` | Refresh diff |
-| `q` | Close zdiff |
-| `gy` | Yank file:line reference |
-| `?` | Show help |
-
-`gy` works in both normal mode (current line) and visual mode (selection). Outputs file:line or file:start-end for ranges. Deletion lines are ignored; selections spanning multiple hunks produce multiple ranges (e.g., `path:10-15, 1020-1025`).
-
-Press `?` while in zdiff to see all available keymaps.
-
-## Configuration
+Use a `FileType` autocmd to choose how the diff buffer behaves. For example,
+these mappings reproduce the suggested defaults:
 
 ```lua
-require("zdiff").setup({
-  -- Whether files are expanded by default
-  default_expanded = false,
+vim.api.nvim_create_autocmd("FileType", {
+  pattern = "zdiff",
+  callback = function(event)
+    local opts = { buffer = event.buf, silent = true }
 
-  -- Default branch for toggle_mode (m key)
-  default_branch = "main",
+    vim.keymap.set("n", "<CR>", "<cmd>ZdiffOpen<cr>", opts)
+    vim.keymap.set("n", "<Tab>", "<cmd>ZdiffToggle<cr>", opts)
+    vim.keymap.set("n", "R", "<cmd>ZdiffRefresh<cr>", opts)
+    vim.keymap.set("n", "q", "<cmd>bdelete<cr>", opts)
 
-  -- Keymap bindings (defaults)
-  keymaps = {
-    goto_file = "<CR>",
-    toggle = "<Tab>",
-    close = "q",
-    refresh = "R",
-    toggle_mode = "m",
-    help = "?",
-    yank_ref = "gy",
-  },
-
-  -- Icons for UI elements
-  icons = {
-    collapsed = "",
-    expanded = "",
-    added = "+",
-    deleted = "-",
-    modified = "~",
-  },
-
-  -- Syntax highlighting strategy
-  syntax = {
-    -- "projection" parses old/new full-file snapshots and projects
-    -- captures onto unified diff lines. "hunk" keeps legacy behavior.
-    mode = "projection",
-    -- Skip projection when either old/new source exceeds this many lines.
-    -- 0 means unlimited.
-    max_lines = 8000,
-  },
+    vim.keymap.set("n", "m", function()
+      if vim.b.zdiff.base == "" then
+        vim.cmd("Zdiff main")
+      else
+        vim.cmd("Zdiff")
+      end
+    end, opts)
+  end,
 })
 ```
 
-### Examples
+These are examples rather than plugin defaults. Any omitted key retains its
+normal Neovim behavior.
 
-#### Set default branch to develop
-
-```lua
-require("zdiff").setup({
-  default_branch = "develop",
-})
-```
-
-#### Custom keymaps
-
-All keymaps can be customized or disabled (set to `false`).
+Every diff buffer exposes its comparison context for filetype configuration:
 
 ```lua
-require("zdiff").setup({
-  keymaps = {
-    goto_file = "o",
-    toggle = "<Space>",
-    yank_ref = "Y",  -- or false to disable
-  },
-})
+vim.b.zdiff.root -- repository root
+vim.b.zdiff.base -- empty for uncommitted changes, otherwise the requested ref
 ```
 
-#### Limit projection on very large files
+## Syntax highlighting
 
-```lua
-require("zdiff").setup({
-  syntax = {
-    -- Files above this line count skip projection and use
-    -- hunk-based syntax highlighting for performance.
-    max_lines = 12000,
-  },
-})
-```
+Expanded hunks are syntax highlighted when Neovim can find a Treesitter parser
+and highlight query for the changed file. This is a best-effort enhancement:
+missing parsers, unsupported filetypes, and unusually large patches retain the
+ordinary diff highlighting without an error.
 
-## Health Check
+Each hunk is parsed locally. This keeps highlighting independent from Git
+loading and navigation, though a fragment beginning inside a larger language
+construct may receive incomplete highlighting.
 
-Run `:checkhealth zdiff` to verify your setup.
+## Current scope
+
+The rewrite uses synchronous Git commands, standard Neovim diff highlight
+groups, and optional Treesitter highlighting from Neovim's built-in APIs.
+
+There is currently no setup function, automatic refresh, sticky winbar, help
+window, icon set, syntax configuration, or custom language integration.
+Optional features will be evaluated individually after the core workflow has
+been used.
 
 ## Development
 
-### Running Tests
-
-Tests use [plenary.nvim](https://github.com/nvim-lua/plenary.nvim):
-
-```bash
+```sh
 make test
-```
-
-Stress test (async refresh + repeated open/close memory baseline check + open-time load benchmark):
-
-```bash
-make stress-test
-```
-
-Open a generated fixture repo with many file types and expanded diffs for manual syntax highlighting checks. The default target uses your normal Neovim config and installed parsers, while the clean target uses `tests/minimal_init.lua`:
-
-```bash
-make syntax-gallery
-make syntax-gallery-clean
-```
-
-Format tracked Lua files with `stylua`:
-
-```bash
 make format
-```
-
-Lint Lua sources with `luacheck`:
-
-```bash
 make lint
 ```
 
-## License
-
-MIT
+Tests require Neovim and plenary.nvim. Linting additionally requires luacheck.
