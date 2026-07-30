@@ -1,5 +1,14 @@
 local M = {}
 
+local status_groups = {
+  A = "Added",
+  C = "Added",
+  D = "Removed",
+  M = "Changed",
+  R = "Changed",
+  ["?"] = "Added",
+}
+
 function M.render(model)
   local rendered = {
     lines = {},
@@ -38,39 +47,35 @@ function M.render(model)
     local path = file.old_path and (file.old_path .. " -> " .. file.path) or file.path
     local additions = string.format("+%d", file.additions)
     local deletions = string.format("-%d", file.deletions)
-    local label = string.format("%s  %s %s", path, additions, deletions)
+    local label = string.format("%s  %s  %s %s", file.status, path, additions, deletions)
     local line = add(label, nil, file_index)
-    if file.status == "A" or file.status == "?" or file.status == "C" then
-      table.insert(
-        rendered.highlights,
-        { line = line, group = "DiffAdd", start_col = 0, end_col = -1 }
-      )
-    elseif file.status == "D" then
-      table.insert(
-        rendered.highlights,
-        { line = line, group = "DiffDelete", start_col = 0, end_col = -1 }
-      )
-    else
-      local additions_start = #path + 2
-      table.insert(rendered.highlights, {
-        line = line,
-        group = "Directory",
-        start_col = 0,
-        end_col = #path,
-      })
-      table.insert(rendered.highlights, {
-        line = line,
-        group = "DiffAdd",
-        start_col = additions_start,
-        end_col = additions_start + #additions,
-      })
-      table.insert(rendered.highlights, {
-        line = line,
-        group = "DiffDelete",
-        start_col = additions_start + #additions + 1,
-        end_col = -1,
-      })
-    end
+    local path_start = #file.status + 2
+    local path_end = path_start + #path
+    local additions_start = path_end + 2
+    table.insert(rendered.highlights, {
+      line = line,
+      group = status_groups[file.status] or "Comment",
+      start_col = 0,
+      end_col = #file.status,
+    })
+    table.insert(rendered.highlights, {
+      line = line,
+      group = "Directory",
+      start_col = path_start,
+      end_col = path_end,
+    })
+    table.insert(rendered.highlights, {
+      line = line,
+      group = "DiffAdd",
+      start_col = additions_start,
+      end_col = additions_start + #additions,
+    })
+    table.insert(rendered.highlights, {
+      line = line,
+      group = "DiffDelete",
+      start_col = additions_start + #additions + 1,
+      end_col = -1,
+    })
     rendered.file_lines[line] = file_index
     rendered.sources[line] = {
       file_index = file_index,

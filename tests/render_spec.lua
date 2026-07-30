@@ -11,17 +11,21 @@ describe("zdiff renderer", function()
     assert.same({
       "Uncommitted changes",
       "",
-      "one.lua  +2 -1",
-      "two.lua  +3 -0",
+      "M  one.lua  +2 -1",
+      "?  two.lua  +3 -0",
     }, result.lines)
     assert.equals(1, result.file_lines[3])
     assert.equals(2, result.file_lines[4])
     assert.same({
       { line = 1, group = "Title", start_col = 0, end_col = -1 },
-      { line = 3, group = "Directory", start_col = 0, end_col = 7 },
-      { line = 3, group = "DiffAdd", start_col = 9, end_col = 11 },
-      { line = 3, group = "DiffDelete", start_col = 12, end_col = -1 },
-      { line = 4, group = "DiffAdd", start_col = 0, end_col = -1 },
+      { line = 3, group = "Changed", start_col = 0, end_col = 1 },
+      { line = 3, group = "Directory", start_col = 3, end_col = 10 },
+      { line = 3, group = "DiffAdd", start_col = 12, end_col = 14 },
+      { line = 3, group = "DiffDelete", start_col = 15, end_col = -1 },
+      { line = 4, group = "Added", start_col = 0, end_col = 1 },
+      { line = 4, group = "Directory", start_col = 3, end_col = 10 },
+      { line = 4, group = "DiffAdd", start_col = 12, end_col = 14 },
+      { line = 4, group = "DiffDelete", start_col = 15, end_col = -1 },
     }, result.highlights)
   end)
 
@@ -74,7 +78,7 @@ describe("zdiff renderer", function()
     assert.same({
       "Uncommitted changes",
       "",
-      "one.lua  +2 -0",
+      "M  one.lua  +2 -0",
       "@@ -1 +1 @@",
       "one",
       "",
@@ -88,7 +92,7 @@ describe("zdiff renderer", function()
     assert.equals("Changes since main", result.lines[1])
   end)
 
-  it("highlights added and deleted files across the full row", function()
+  it("keeps added and deleted file paths separate from their status", function()
     local result = render.render({
       files = {
         { path = "added.lua", status = "A", additions = 4, deletions = 0 },
@@ -96,9 +100,21 @@ describe("zdiff renderer", function()
       },
     })
     assert.same({
+      "Uncommitted changes",
+      "",
+      "A  added.lua  +4 -0",
+      "D  deleted.lua  +0 -8",
+    }, result.lines)
+    assert.same({
       { line = 1, group = "Title", start_col = 0, end_col = -1 },
-      { line = 3, group = "DiffAdd", start_col = 0, end_col = -1 },
-      { line = 4, group = "DiffDelete", start_col = 0, end_col = -1 },
+      { line = 3, group = "Added", start_col = 0, end_col = 1 },
+      { line = 3, group = "Directory", start_col = 3, end_col = 12 },
+      { line = 3, group = "DiffAdd", start_col = 14, end_col = 16 },
+      { line = 3, group = "DiffDelete", start_col = 17, end_col = -1 },
+      { line = 4, group = "Removed", start_col = 0, end_col = 1 },
+      { line = 4, group = "Directory", start_col = 3, end_col = 14 },
+      { line = 4, group = "DiffAdd", start_col = 16, end_col = 18 },
+      { line = 4, group = "DiffDelete", start_col = 19, end_col = -1 },
     }, result.highlights)
   end)
 end)
