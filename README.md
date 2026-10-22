@@ -1,8 +1,9 @@
 # zdiff.nvim
 
-An experimental, small Git diff viewer for Neovim.
+A small Git diff viewer for Neovim, inspired by
+[Zed's](https://zed.dev) multi-buffer diff view.
 
-This branch is a ground-up rewrite focused on one review loop:
+Review changes across multiple files in a single buffer:
 
 1. See which uncommitted files changed and by how much.
 2. Expand selected files to inspect their patches.
@@ -11,6 +12,34 @@ This branch is a ground-up rewrite focused on one review loop:
 The rendered diff is ordinary text with real blank-line boundaries between
 hunks, so native motions such as `{`, `}`, search, marks, and operators remain
 useful without spacing out the file overview.
+
+**Upgrading from the previous version?** See the [migration guide](MIGRATION.md)
+for configuration changes and how to pin the previous version.
+
+## Requirements
+
+- Neovim >= 0.9.0
+- Git
+- Optional: Treesitter parsers and highlight queries for syntax highlighting
+
+## Installation
+
+With [lazy.nvim](https://github.com/folke/lazy.nvim):
+
+```lua
+{
+  "martindur/zdiff.nvim",
+  cmd = "Zdiff",
+  keys = {
+    { "<leader>zd", "<cmd>Zdiff<cr>", desc = "Zdiff (uncommitted)" },
+    { "<leader>zD", "<cmd>Zdiff main<cr>", desc = "Zdiff (vs main)" },
+  },
+}
+```
+
+For other plugin managers, install `martindur/zdiff.nvim` and run `:Zdiff`.
+No `setup()` call is needed. With lazy.nvim, omit `opts` and any `config`
+function that calls `setup()`.
 
 ## Usage
 
@@ -23,6 +52,9 @@ useful without spacing out the file overview.
 merge base with `HEAD`, including current staged, unstaged, and untracked work.
 Each repository and comparison has one reusable buffer with independent
 expansion and cursor state.
+Reopening a comparison through `:Zdiff` refreshes its contents. Returning to
+the buffer with `<C-o>` or a buffer switch does not refresh it; use
+`:ZdiffRefresh` when needed.
 
 The plugin defines no keymaps. `:Zdiff` is global; the action commands exist
 only inside a zdiff buffer:
@@ -31,10 +63,10 @@ only inside a zdiff buffer:
 | --- | --- |
 | `:ZdiffToggle` | Toggle the file under the cursor |
 | `:ZdiffOpen` | Open the source location under the cursor |
-| `:ZdiffRefresh` | Reload uncommitted changes |
+| `:ZdiffRefresh` | Reload the current comparison |
 
 Use a `FileType` autocmd to choose how the diff buffer behaves. For example,
-these mappings reproduce the suggested defaults:
+these mappings provide navigation, expansion, refresh, and comparison switching:
 
 ```lua
 vim.api.nvim_create_autocmd("FileType", {
@@ -79,16 +111,6 @@ Each hunk is parsed locally. This keeps highlighting independent from Git
 loading and navigation, though a fragment beginning inside a larger language
 construct may receive incomplete highlighting.
 
-## Current scope
-
-The rewrite uses synchronous Git commands, standard Neovim diff highlight
-groups, and optional Treesitter highlighting from Neovim's built-in APIs.
-
-There is currently no setup function, automatic refresh, sticky winbar, help
-window, icon set, syntax configuration, or custom language integration.
-Optional features will be evaluated individually after the core workflow has
-been used.
-
 ## Development
 
 ```sh
@@ -98,3 +120,8 @@ make lint
 ```
 
 Tests require Neovim and plenary.nvim. Linting additionally requires luacheck.
+Formatting requires StyLua.
+
+## License
+
+MIT

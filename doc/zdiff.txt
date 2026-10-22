@@ -5,6 +5,7 @@ CONTENTS                                                        *zdiff-contents*
 
 1. Commands ..................................................... |zdiff-commands|
 2. Configuration ........................................... |zdiff-configuration|
+3. Migration ................................................... |zdiff-migration|
 
 =============================================================================
 COMMANDS                                                        *zdiff-commands*
@@ -13,6 +14,9 @@ COMMANDS                                                        *zdiff-commands*
 :Zdiff [ref]            Open the uncommitted change summary, or changes since
                         the merge base of [ref] and HEAD. Existing comparison
                         buffers are refreshed and reused.
+
+Returning to a comparison with CTRL-O or a buffer switch does not refresh it.
+Use :ZdiffRefresh or reopen it through :Zdiff to reload its contents.
 
                                                         *:ZdiffToggle*
 :ZdiffToggle            Expand or collapse the file under the cursor.
@@ -67,5 +71,24 @@ Expanded hunks are syntax highlighted when Neovim can find a Treesitter parser
 and highlight query for the changed file. Missing parsers, unsupported
 filetypes, and unusually large patches retain the ordinary diff highlighting.
 Syntax highlighting requires no zdiff configuration.
+
+=============================================================================
+MIGRATION                                                       *zdiff-migration*
+
+No setup() call is needed. Remove require("zdiff").setup(...) from your
+configuration. With lazy.nvim, also remove opts and any config function that
+calls setup(). Configure mappings with the FileType autocmd above.
+
+setup(opts) remains for compatibility with previous configurations. It ignores
+all options and warns once per Neovim session. Previous mappings and features
+are not restored by calling it.
+
+To keep the previous configuration and behavior, pin the plugin to the legacy
+tag. With lazy.nvim, add tag = "legacy" to your existing plugin specification
+and keep your existing options. Then update zdiff through your plugin manager.
+The preserved commit is 6e2a105d7cc138b25e2907589ad2c5251e608424.
+
+See the full migration guide for removed features and configuration changes:
+https://github.com/martindur/zdiff.nvim/blob/main/MIGRATION.md
 
 vim:tw=78:ts=8:noet:ft=help:norl:

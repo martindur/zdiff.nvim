@@ -3,9 +3,25 @@ local Session = require("zdiff.session")
 
 local M = {}
 local sessions = {}
+local setup_warned = false
 
 local function notify(message, level)
   vim.notify("[zdiff] " .. message, level or vim.log.levels.INFO)
+end
+
+-- Compatibility for configurations written before the rewrite.
+function M.setup(_opts)
+  if setup_warned then
+    return
+  end
+  setup_warned = true
+  notify(
+    "setup() is deprecated and its options are ignored. "
+      .. "Remove setup() (or lazy.nvim opts) and configure mappings with a FileType autocmd. "
+      .. "To keep the previous version, pin tag 'legacy'. "
+      .. "See https://github.com/martindur/zdiff.nvim/blob/main/MIGRATION.md",
+    vim.log.levels.WARN
+  )
 end
 
 local function session_key(root, base)

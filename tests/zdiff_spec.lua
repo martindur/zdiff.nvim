@@ -28,9 +28,11 @@ end
 
 describe("zdiff", function()
   local original_directory
+  local original_notify
 
   before_each(function()
     original_directory = vim.fn.getcwd()
+    original_notify = vim.notify
   end)
 
   local function current_session()
@@ -43,6 +45,7 @@ describe("zdiff", function()
   end
 
   after_each(function()
+    vim.notify = original_notify
     vim.cmd("cd " .. vim.fn.fnameescape(original_directory))
     for _, buffer in ipairs(vim.api.nvim_list_bufs()) do
       if vim.api.nvim_buf_is_valid(buffer) then
@@ -52,6 +55,30 @@ describe("zdiff", function()
         end
       end
     end
+  end)
+
+  it("accepts legacy setup calls and warns only once without preventing use", function()
+    local notifications = {}
+    vim.notify = function(message, level)
+      table.insert(notifications, { message = message, level = level })
+    end
+
+    zdiff.setup({ default_expanded = true, keymaps = { toggle = "<Space>" } })
+    zdiff.setup({})
+    zdiff.setup()
+
+    assert.equals(1, #notifications)
+    assert.equals(vim.log.levels.WARN, notifications[1].level)
+    assert.matches("options are ignored", notifications[1].message, 1, true)
+    assert.matches("legacy", notifications[1].message, 1, true)
+    assert.matches("MIGRATION.md", notifications[1].message, 1, true)
+
+    local repo = fixture()
+    vim.cmd("cd " .. vim.fn.fnameescape(repo))
+    zdiff.open()
+    local session = assert(current_session())
+    assert.is_falsy(session.model.files[1].expanded)
+    assert.equals(1, #notifications)
   end)
 
   it("opens, expands, and returns from source through the jumplist", function()
