@@ -1,29 +1,16 @@
 # zdiff.nvim
 
 A small Git diff viewer for Neovim, inspired by
-[Zed's](https://zed.dev) multi-buffer diff view.
-
-Review changes across multiple files in a single buffer:
-
-1. See which uncommitted files changed and by how much.
-2. Expand selected files to inspect their patches.
-3. Open a changed source line and use `<C-o>` to return to the diff.
-
-The rendered diff is ordinary text with real blank-line boundaries between
-hunks, so native motions such as `{`, `}`, search, marks, and operators remain
-useful without spacing out the file overview.
-
-**Upgrading from the previous version?** See the [migration guide](MIGRATION.md)
-for configuration changes and how to pin the previous version.
+[Zed's](https://zed.dev) multi-buffer diff view. Review changes across files
+in one buffer, expand their patches, and jump to source lines. Native motions,
+search, and operators work on the diff text, with optional Treesitter highlighting.
 
 ## Requirements
 
 - Neovim >= 0.9.0
 - Git
-- Optional: Treesitter parsers and highlight queries for syntax highlighting
-
-[treebox](https://github.com/martindur/treebox) is a simple CLI for managing
-Treesitter parsers.
+- Optional: Treesitter parsers and highlight queries for syntax highlighting.
+  [treebox](https://github.com/martindur/treebox) is a simple CLI for managing parsers.
 
 ## Installation
 
@@ -40,9 +27,7 @@ With [lazy.nvim](https://github.com/folke/lazy.nvim):
 }
 ```
 
-For other plugin managers, install `martindur/zdiff.nvim` and run `:Zdiff`.
-No `setup()` call is needed. With lazy.nvim, omit `opts` and any `config`
-function that calls `setup()`.
+No `setup()` call is needed.
 
 ## Usage
 
@@ -51,16 +36,10 @@ function that calls `setup()`.
 :Zdiff main
 ```
 
-`:Zdiff` opens uncommitted changes. Passing a Git ref opens changes since its
-merge base with `HEAD`, including current staged, unstaged, and untracked work.
-Each repository and comparison has one reusable buffer with independent
-expansion and cursor state.
-Reopening a comparison through `:Zdiff` refreshes its contents. Returning to
-the buffer with `<C-o>` or a buffer switch does not refresh it; use
-`:ZdiffRefresh` when needed.
+`:Zdiff` shows uncommitted changes. Pass any Git ref to compare from its merge
+base with `HEAD`, including staged, unstaged, and untracked changes.
 
-The plugin defines no keymaps. `:Zdiff` is global; the action commands exist
-only inside a zdiff buffer:
+Inside the diff buffer:
 
 | Command | Action |
 | --- | --- |
@@ -68,8 +47,11 @@ only inside a zdiff buffer:
 | `:ZdiffOpen` | Open the source location under the cursor |
 | `:ZdiffRefresh` | Reload the current comparison |
 
-Use a `FileType` autocmd to choose how the diff buffer behaves. For example,
-these mappings provide navigation, expansion, refresh, and comparison switching:
+Use `<C-o>` to return after opening a source line.
+
+## Keymaps
+
+Choose your own buffer-local mappings. For example:
 
 ```lua
 vim.api.nvim_create_autocmd("FileType", {
@@ -82,7 +64,7 @@ vim.api.nvim_create_autocmd("FileType", {
     vim.keymap.set("n", "R", "<cmd>ZdiffRefresh<cr>", opts)
     vim.keymap.set("n", "q", "<cmd>bdelete<cr>", opts)
 
-    -- mode switching
+    -- Switch between uncommitted changes and comparison against main.
     vim.keymap.set("n", "m", function()
       if vim.b.zdiff.base == "" then
         vim.cmd("Zdiff main")
@@ -94,25 +76,8 @@ vim.api.nvim_create_autocmd("FileType", {
 })
 ```
 
-These are examples rather than plugin defaults. Any omitted key retains its normal Neovim behavior.
-
-Every diff buffer exposes its comparison context for filetype configuration:
-
-```lua
-vim.b.zdiff.root -- repository root
-vim.b.zdiff.base -- empty for uncommitted changes, otherwise the requested ref
-```
-
-## Syntax highlighting
-
-Expanded hunks are syntax highlighted when Neovim can find a Treesitter parser
-and highlight query for the changed file. This is a best-effort enhancement:
-missing parsers, unsupported filetypes, and unusually large patches retain the
-ordinary diff highlighting without an error.
-
-Each hunk is parsed locally. This keeps highlighting independent from Git
-loading and navigation, though a fragment beginning inside a larger language
-construct may receive incomplete highlighting.
+The plugin defines no default mappings. See `:help zdiff` for more configuration
+examples, or the [migration guide](MIGRATION.md) when upgrading.
 
 ## Development
 
@@ -122,8 +87,7 @@ make format
 make lint
 ```
 
-Tests require Neovim and plenary.nvim. Linting additionally requires luacheck.
-Formatting requires StyLua.
+Requires plenary.nvim for tests, StyLua for formatting, and luacheck for linting.
 
 ## License
 
