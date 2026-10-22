@@ -22,6 +22,9 @@ for configuration changes and how to pin the previous version.
 - Git
 - Optional: Treesitter parsers and highlight queries for syntax highlighting
 
+[treebox](https://github.com/martindur/treebox) is a simple CLI for managing
+Treesitter parsers.
+
 ## Installation
 
 With [lazy.nvim](https://github.com/folke/lazy.nvim):
@@ -79,6 +82,7 @@ vim.api.nvim_create_autocmd("FileType", {
     vim.keymap.set("n", "R", "<cmd>ZdiffRefresh<cr>", opts)
     vim.keymap.set("n", "q", "<cmd>bdelete<cr>", opts)
 
+    -- mode switching
     vim.keymap.set("n", "m", function()
       if vim.b.zdiff.base == "" then
         vim.cmd("Zdiff main")
@@ -90,8 +94,7 @@ vim.api.nvim_create_autocmd("FileType", {
 })
 ```
 
-These are examples rather than plugin defaults. Any omitted key retains its
-normal Neovim behavior.
+These are examples rather than plugin defaults. Any omitted key retains its normal Neovim behavior.
 
 Every diff buffer exposes its comparison context for filetype configuration:
 
