@@ -5,6 +5,8 @@ A small Git diff viewer for Neovim, inspired by
 in one buffer, expand their patches, and jump to source lines. Native motions,
 search, and operators work on the diff text, with optional Treesitter highlighting.
 
+![Expanded Lua diff with Treesitter highlighting in Tokyo Night](doc/images/expanded.png)
+
 ## Requirements
 
 - Neovim >= 0.9.0
@@ -38,6 +40,8 @@ No `setup()` call is needed.
 
 `:Zdiff` shows uncommitted changes. Pass any Git ref to compare from its merge
 base with `HEAD`, including staged, unstaged, and untracked changes.
+
+![File overview showing modified, added, deleted, renamed, and untracked files](doc/images/overview.png)
 
 Inside the diff buffer:
 
@@ -83,11 +87,14 @@ examples, or the [migration guide](MIGRATION.md) when upgrading.
 
 ```sh
 make test
+make gallery
+make screenshots
 make format
 make lint
 ```
 
 Requires plenary.nvim for tests, StyLua for formatting, and luacheck for linting.
+See [development notes](tests/README.md) for the gallery and screenshot dependencies.
 
 ## License
 
