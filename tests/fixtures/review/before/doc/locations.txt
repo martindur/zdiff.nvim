@@ -1,0 +1,8 @@
+*locations.txt*                    Saved project locations
+
+COMMANDS
+
+:WaypointAdd [label]    Save the current file with an optional label.
+:WaypointList           Open saved locations in the quickfix list.
+
+Use CTRL-O to return after visiting a saved location.

@@ -1,4 +1,4 @@
-.PHONY: test test-file stress-test syntax-gallery syntax-gallery-clean format lint
+.PHONY: test test-file gallery screenshots format lint
 
 test:
 	nvim --headless -u tests/minimal_init.lua -c "PlenaryBustedDirectory tests/ {minimal_init = 'tests/minimal_init.lua', sequential = true}"
@@ -7,14 +7,11 @@ test:
 test-file:
 	nvim --headless -u tests/minimal_init.lua -c "PlenaryBustedFile $(FILE)"
 
-stress-test:
-	nvim --headless -u tests/minimal_init.lua -c "lua require('tests.stress').run()" -c "qa!"
+gallery:
+	nvim --cmd "set runtimepath^=$(CURDIR)" -c "lua require('tests.gallery').open()"
 
-syntax-gallery:
-	nvim --cmd "set runtimepath^=$(CURDIR)" -c "lua require('tests.syntax_gallery').open()"
-
-syntax-gallery-clean:
-	nvim -u tests/minimal_init.lua -c "lua require('tests.syntax_gallery').open()"
+screenshots:
+	python3 tests/screenshots.py
 
 format:
 	stylua lua/ plugin/ tests/

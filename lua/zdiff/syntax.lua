@@ -1,146 +1,143 @@
 local M = {}
 
----@class ZdiffSyntaxHighlight
----@field line number
----@field hl_group string
----@field col_start number
----@field col_end number
+-- Syntax is a best-effort enhancement. Keep synchronous parsing bounded so
+-- opening or expanding an unusually large patch retains the plain diff.
+local MAX_PARSE_BYTES = 256 * 1024
+local DEFAULT_PRIORITY = 100
 
----@class ZdiffInjection
----@field line_offset number
----@field lines string[]
----@field lang string
----@field col_offsets? table<number, number>
-
-local filetype_aliases = {
-  bash = "sh",
-  javascript = "js",
-  shell = "sh",
-  typescript = "ts",
-}
-
-local injection_providers = {
-  markdown = require("zdiff.syntax.markdown"),
-  python = require("zdiff.syntax.python"),
-}
-
----@param lang string
----@return boolean
-function M.has_highlights(lang)
-  if not lang or not pcall(vim.treesitter.language.inspect, lang) then
-    return false
-  end
-  local ok, query = pcall(vim.treesitter.query.get, lang, "highlights")
-  return ok and query ~= nil
-end
-
----@param ft string
----@return string|nil
-function M.get_lang_from_filetype(ft)
-  for _, candidate in ipairs({ ft, filetype_aliases[ft] }) do
-    if candidate then
-      local lang = vim.treesitter.language.get_lang(candidate)
-      if lang and M.has_highlights(lang) then
-        return lang
-      end
-    end
-  end
-  return nil
-end
-
----@param filepath string
----@return string|nil
-function M.get_lang_from_path(filepath)
-  local ft = vim.filetype.match({ filename = filepath })
-  if not ft then
+local function language_for_path(path)
+  if
+    not vim.filetype
+    or not vim.filetype.match
+    or not vim.treesitter
+    or not vim.treesitter.get_string_parser
+    or not vim.treesitter.language
+    or not vim.treesitter.language.get_lang
+  then
     return nil
   end
-  return M.get_lang_from_filetype(ft)
+  local filetype = vim.filetype.match({ filename = path })
+  return filetype and vim.treesitter.language.get_lang(filetype) or nil
 end
 
----@param code string[]
----@param lang string
----@return ZdiffInjection[]
-local function get_injections(code, lang)
-  local provider = injection_providers[lang]
-  if provider then
-    return provider.get_injections(code, M)
+local function range_for_capture(node, source, capture_metadata)
+  if vim.treesitter.get_range then
+    local range = vim.treesitter.get_range(node, source, capture_metadata)
+    return range[1], range[2], range[4], range[5]
   end
-  return {}
+  return node:range()
 end
 
----@param code string[]
----@param lang string
----@return ZdiffSyntaxHighlight[]
-local function get_treesitter_highlights(code, lang)
-  local source = table.concat(code, "\n")
-  local ok, parser = pcall(vim.treesitter.get_string_parser, source, lang)
-  if not ok or not parser then
+local function append_capture(highlights, lines, rows, group, priority, range)
+  local start_row, start_col, end_row, end_col = unpack(range)
+  local last_row = end_col == 0 and end_row - 1 or end_row
+  for source_row = start_row, last_row do
+    local buffer_line = rows[source_row + 1]
+    if buffer_line then
+      table.insert(highlights, {
+        line = buffer_line,
+        group = group,
+        start_col = source_row == start_row and start_col or 0,
+        end_col = source_row == end_row and end_col or #lines[source_row + 1],
+        priority = priority,
+      })
+    end
+  end
+end
+
+local function parse_fragment(lines, rows, lang)
+  if #lines == 0 then
     return {}
   end
-
-  local trees = parser:parse()
-  if not trees or #trees == 0 then
+  local source = table.concat(lines, "\n") .. "\n"
+  local parser_ok, parser = pcall(vim.treesitter.get_string_parser, source, lang)
+  if not parser_ok or not parser then
     return {}
   end
-
-  local query_ok, query = pcall(vim.treesitter.query.get, lang, "highlights")
-  if not query_ok or not query then
+  local parse_ok = pcall(parser.parse, parser, true)
+  if not parse_ok then
     return {}
   end
 
   local highlights = {}
-  for id, node, _ in query:iter_captures(trees[1]:root(), source) do
-    local name = query.captures[id]
-    local start_row, start_col, end_row, end_col = node:range()
-    local hl_group = "@" .. name
+  pcall(parser.for_each_tree, parser, function(tree, language_tree)
+    local tree_lang = language_tree:lang()
+    local query_ok, query = pcall(vim.treesitter.query.get, tree_lang, "highlights")
+    if not query_ok or not query then
+      return
+    end
+    local capture_ok = pcall(function()
+      for id, node, metadata in query:iter_captures(tree:root(), source) do
+        local capture = query.captures[id]
+        if capture and not vim.startswith(capture, "_") then
+          local capture_metadata = metadata[id]
+          local priority = tonumber(metadata.priority)
+            or (capture_metadata and tonumber(capture_metadata.priority))
+            or DEFAULT_PRIORITY
+          append_capture(
+            highlights,
+            lines,
+            rows,
+            "@" .. capture .. "." .. tree_lang,
+            priority,
+            { range_for_capture(node, source, capture_metadata) }
+          )
+        end
+      end
+    end)
+    if not capture_ok then
+      return
+    end
+  end)
+  return highlights
+end
 
-    if start_row == end_row then
-      table.insert(highlights, {
-        line = start_row + 1,
-        hl_group = hl_group,
-        col_start = start_col,
-        col_end = end_col,
-      })
-    else
-      for row = start_row, end_row do
-        table.insert(highlights, {
-          line = row + 1,
-          hl_group = hl_group,
-          col_start = row == start_row and start_col or 0,
-          col_end = row == end_row and end_col or -1,
-        })
+local function build_fragments(hunk, rows)
+  local old = { lines = {}, rows = {} }
+  local new = { lines = {}, rows = {} }
+  local bytes = 0
+  for line_index, patch_line in ipairs(hunk.lines) do
+    local buffer_line = rows[line_index]
+    if patch_line.kind ~= "add" then
+      table.insert(old.lines, patch_line.text)
+      table.insert(old.rows, patch_line.kind == "delete" and buffer_line or false)
+      bytes = bytes + #patch_line.text + 1
+    end
+    if patch_line.kind ~= "delete" then
+      table.insert(new.lines, patch_line.text)
+      table.insert(new.rows, buffer_line)
+      bytes = bytes + #patch_line.text + 1
+    end
+  end
+  return old, new, bytes
+end
+
+local function get_highlights(files, patch_rows)
+  local highlights = {}
+  local parsed_bytes = 0
+  for file_index, file in ipairs(files) do
+    local file_rows = patch_rows[file_index]
+    local lang = file_rows and language_for_path(file.path) or nil
+    if lang then
+      for hunk_index, hunk in ipairs(file.patch or {}) do
+        local rows = file_rows[hunk_index]
+        if rows then
+          local old, new, bytes = build_fragments(hunk, rows)
+          if parsed_bytes + bytes <= MAX_PARSE_BYTES then
+            parsed_bytes = parsed_bytes + bytes
+            vim.list_extend(highlights, parse_fragment(new.lines, new.rows, lang))
+            vim.list_extend(highlights, parse_fragment(old.lines, old.rows, lang))
+          end
+        end
       end
     end
   end
-
   return highlights
 end
 
----@param highlights ZdiffSyntaxHighlight[]
----@param injection ZdiffInjection
-local function append_injection_highlights(highlights, injection)
-  local injected = M.get_highlights(injection.lines, injection.lang)
-  for _, hl in ipairs(injected) do
-    local col_offset = (injection.col_offsets and injection.col_offsets[hl.line]) or 0
-    table.insert(highlights, {
-      line = injection.line_offset + hl.line,
-      hl_group = hl.hl_group,
-      col_start = col_offset + hl.col_start,
-      col_end = hl.col_end == -1 and -1 or (col_offset + hl.col_end),
-    })
-  end
-end
-
----@param code string[]
----@param lang string
----@return ZdiffSyntaxHighlight[]
-function M.get_highlights(code, lang)
-  local highlights = get_treesitter_highlights(code, lang)
-  for _, injection in ipairs(get_injections(code, lang)) do
-    append_injection_highlights(highlights, injection)
-  end
-  return highlights
+function M.highlights(files, patch_rows)
+  local ok, highlights = pcall(get_highlights, files, patch_rows)
+  return ok and highlights or {}
 end
 
 return M
