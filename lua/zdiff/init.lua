@@ -19,7 +19,7 @@ function M.setup(_opts)
     "setup() is deprecated and its options are ignored. "
       .. "Remove setup() (or lazy.nvim opts) and configure mappings with a FileType autocmd. "
       .. "To keep the previous version, pin tag 'legacy'. "
-      .. "See https://github.com/martindur/zdiff.nvim/blob/main/MIGRATION.md",
+      .. "See https://github.com/martindur/zdiff.nvim#migration",
     vim.log.levels.WARN
   )
 end

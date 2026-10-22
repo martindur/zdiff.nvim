@@ -75,20 +75,7 @@ Syntax highlighting requires no zdiff configuration.
 =============================================================================
 MIGRATION                                                       *zdiff-migration*
 
-No setup() call is needed. Remove require("zdiff").setup(...) from your
-configuration. With lazy.nvim, also remove opts and any config function that
-calls setup(). Configure mappings with the FileType autocmd above.
-
-setup(opts) remains for compatibility with previous configurations. It ignores
-all options and warns once per Neovim session. Previous mappings and features
-are not restored by calling it.
-
-To keep the previous configuration and behavior, pin the plugin to the legacy
-tag. With lazy.nvim, add tag = "legacy" to your existing plugin specification
-and keep your existing options. Then update zdiff through your plugin manager.
-The preserved commit is 6e2a105d7cc138b25e2907589ad2c5251e608424.
-
-See the full migration guide for removed features and configuration changes:
-https://github.com/martindur/zdiff.nvim/blob/main/MIGRATION.md
+See the README migration section for upgrading or pinning the legacy version:
+https://github.com/martindur/zdiff.nvim#migration
 
 vim:tw=78:ts=8:noet:ft=help:norl:

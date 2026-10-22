@@ -5,6 +5,8 @@ A small Git diff viewer for Neovim, inspired by
 in one buffer, expand their patches, and jump to source lines. Native motions,
 search, and operators work on the diff text, with optional Treesitter highlighting.
 
+The plugin no longer uses `setup()`. If you're upgrading, see [Migration](#migration).
+
 ![Expanded Lua diff with Treesitter highlighting in Tokyo Night](doc/images/expanded.png)
 
 ## Requirements
@@ -81,7 +83,7 @@ vim.api.nvim_create_autocmd("FileType", {
 ```
 
 The plugin defines no default mappings. See `:help zdiff` for more configuration
-examples, or the [migration guide](MIGRATION.md) when upgrading.
+examples.
 
 ## Development
 
@@ -99,3 +101,21 @@ See [development notes](tests/README.md) for the gallery and screenshot dependen
 ## License
 
 MIT
+
+## Migration
+
+```lua
+{
+  "martindur/zdiff.nvim",
+  tag = "legacy",
+  opts = {}, -- Keep your existing options here.
+}
+```
+
+Pin `legacy` to keep the previous version and configuration, then update zdiff
+through your plugin manager.
+
+To use the current version, remove `setup()` calls and lazy.nvim's `opts`,
+and add the [buffer mappings](#keymaps) you want. Existing `setup()` calls
+ignore options and warn once per session. Refresh with `:ZdiffRefresh` or by
+reopening `:Zdiff`.

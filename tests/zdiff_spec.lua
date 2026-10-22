@@ -71,7 +71,7 @@ describe("zdiff", function()
     assert.equals(vim.log.levels.WARN, notifications[1].level)
     assert.matches("options are ignored", notifications[1].message, 1, true)
     assert.matches("legacy", notifications[1].message, 1, true)
-    assert.matches("MIGRATION.md", notifications[1].message, 1, true)
+    assert.matches("zdiff.nvim#migration", notifications[1].message, 1, true)
 
     local repo = fixture()
     vim.cmd("cd " .. vim.fn.fnameescape(repo))

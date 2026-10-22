@@ -31,8 +31,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Locate Neovim installation filesystem
+        id: neovim-installer
+        run: echo "tmpdir=$HOME" >> "$GITHUB_OUTPUT"
+
       - name: Install Neovim
         uses: rhysd/action-setup-vim@v1
+        env:
+          # The action moves the extracted release into $HOME with rename().
+          TMPDIR: ${{ steps.neovim-installer.outputs.tmpdir }}
         with:
           neovim: true
           version: ${{ matrix.neovim_version }}
