@@ -209,6 +209,35 @@ describe("zdiff", function()
     assert.is_true(main.model.files[1].expanded)
   end)
 
+  for _, command in ipairs({ "bdelete", "bunload" }) do
+    it("reopens after " .. command .. " and reloading the orphaned buffer", function()
+      local repo = fixture()
+      vim.cmd("cd " .. vim.fn.fnameescape(repo))
+      zdiff.open()
+      local original = assert(current_session())
+      local name = vim.api.nvim_buf_get_name(original.buf)
+
+      vim.cmd(command)
+      assert.is_nil(next(zdiff._sessions))
+      vim.cmd("buffer " .. original.buf)
+      assert.is_true(vim.api.nvim_buf_is_loaded(original.buf))
+      assert.is_false(vim.bo[original.buf].buflisted)
+
+      zdiff.open()
+      local reopened = assert(current_session())
+      assert.is_false(vim.api.nvim_buf_is_valid(original.buf))
+      assert.equals(name, vim.api.nvim_buf_get_name(reopened.buf))
+      assert.same({ root = repo, base = "" }, vim.b[reopened.buf].zdiff)
+      assert.equals(1, vim.tbl_count(zdiff._sessions))
+      vim.api.nvim_win_set_cursor(0, { 3, 0 })
+      vim.cmd("ZdiffToggle")
+      assert.is_true(reopened.model.files[1].expanded)
+
+      zdiff.open()
+      assert.equals(reopened.buf, vim.api.nvim_get_current_buf())
+    end)
+  end
+
   it("forgets a session deleted with the native buffer command", function()
     local repo = fixture()
     vim.cmd("cd " .. vim.fn.fnameescape(repo))

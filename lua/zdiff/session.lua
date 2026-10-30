@@ -19,10 +19,17 @@ function Session.new(change_set, on_delete)
     rendered = nil,
     last_position = nil,
   }, Session)
-  self.buf = vim.api.nvim_create_buf(false, true)
   local label = self.model.base == "" and "uncommitted" or self.model.base
   local identity = vim.fn.sha256(self.model.root .. "\0" .. self.model.base):sub(1, 12)
-  vim.api.nvim_buf_set_name(self.buf, string.format("zdiff://%s/%s", label, identity))
+  local name = string.format("zdiff://%s/%s", label, identity)
+  -- Deleted or unloaded buffers can be reloaded after their session is forgotten.
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_get_name(buf) == name then
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end
+  end
+  self.buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_name(self.buf, name)
   vim.bo[self.buf].buftype = "nofile"
   vim.bo[self.buf].bufhidden = "hide"
   vim.bo[self.buf].swapfile = false
